@@ -10,7 +10,8 @@ import schedule
 import time
 import threading
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
+import pytz
 from firebase_admin import credentials, firestore, initialize_app
 
 # Load environment variables
@@ -20,10 +21,8 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": ["http://localhost:3000", "https://booking-report.vercel.app"]}})
 
-# Initialize Firestore with the specified path to credentials file
+# Initialize Firestore
 credential_path = os.path.join(os.path.dirname(__file__), "firebase-admin-sdk.json")
-
-# Verify that the credentials file exists
 if not os.path.exists(credential_path):
     raise FileNotFoundError(f"Firebase credentials file not found at: {credential_path}")
 
@@ -36,13 +35,9 @@ SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 SENDER_EMAIL_MUMBAI = "tanks@dessertmarine.com"
 SENDER_PASSWORD_MUMBAI = "awou kyet gbgs btud"
-# SENDER_EMAIL_GUJARAT = "mundra@dessertmarine.com"
-# SENDER_PASSWORD_GUJARAT = "<add-mundra-password-here>"
 
-# Helper to get sender email/password by location
 BRANCH_EMAILS = {
     "MUMBAI": (SENDER_EMAIL_MUMBAI, SENDER_PASSWORD_MUMBAI),
-    # "GUJARAT": (SENDER_EMAIL_GUJARAT, SENDER_PASSWORD_GUJARAT)
 }
 
 def get_sender_by_location(location):
@@ -50,18 +45,586 @@ def get_sender_by_location(location):
         loc = location.strip().upper()
         if "MUMBAI" in loc:
             return SENDER_EMAIL_MUMBAI, SENDER_PASSWORD_MUMBAI
-        # if "GUJARAT" in loc or "MUNDRA" in loc:
-        #     return SENDER_EMAIL_GUJARAT, SENDER_PASSWORD_GUJARAT
     return SENDER_EMAIL_MUMBAI, SENDER_PASSWORD_MUMBAI
+
+def parse_si_cutoff_date(si_cutoff):
+    """Parse SI cutoff date from dd/mm-hhmm HRS format (e.g., 12/06-1400 HRS) to datetime."""
+    try:
+        date_part, time_part = si_cutoff.split('-')
+        hour_minute = time_part.replace(" HRS", "").strip()
+        day, month = date_part.split('/')
+        hour, minute = hour_minute[:2], hour_minute[2:]
+        year = datetime.now().year
+        dt = datetime.strptime(f"{day}/{month}/{year} {hour}:{minute}", "%d/%m/%Y %H:%M")
+        ist = pytz.timezone('Asia/Kolkata')
+        return ist.localize(dt)
+    except Exception as e:
+        print(f"Error parsing SI cutoff date {si_cutoff}: {str(e)}")
+        return None
+
+def fetch_si_cutoff_data():
+    """
+    Fetch bookings with SI cutoff dates and group by customer/salesperson.
+    Returns a dictionary with customer emails as keys and lists of bookings as values.
+    """
+    try:
+        bookings_ref = db.collection("entries")
+        docs = bookings_ref.stream()
+        si_cutoff_data = {}
+
+        for doc in docs:
+            entry = doc.to_dict()
+            entry["id"] = doc.id
+
+            si_cutoff = entry.get("siCutOff", "")
+            if not si_cutoff:
+                print(f"No SI cutoff found for entry {entry['id']}")
+                continue
+
+            si_cutoff_dt = parse_si_cutoff_date(si_cutoff)
+            if not si_cutoff_dt:
+                print(f"Invalid SI cutoff date for entry {entry['id']}: {si_cutoff}")
+                continue
+
+            customer = entry.get("customer", {})
+            if not isinstance(customer, dict):
+                print(f"Skipping entry {entry['id']}: 'customer' field is not a dictionary, found {type(customer)}: {customer}")
+                continue
+
+            customer_email = customer.get("customerEmail", [])
+            if not customer_email:
+                print(f"No customer email found for entry {entry['id']}")
+                continue
+            customer_email = customer_email[0] if isinstance(customer_email, list) else customer_email
+            print(f"Fetched customer email for booking {entry.get('bookingNo', entry['id'])}: {customer_email}")
+
+            sales_person_emails = customer.get("salesPersonEmail", [])
+            if not sales_person_emails:
+                print(f"No salesperson email found for entry {entry['id']}")
+                continue
+
+            si_filed = entry.get("siFiled", False)
+            if si_filed:
+                print(f"SI already filed for entry {entry['id']}, but sending reminder as per template")
+
+            customer_name = customer.get("name", "")
+            booking_no = entry.get("bookingNo", "")
+            if not booking_no:
+                print(f"No booking number found for entry {entry['id']}")
+                continue
+
+            equipment_type = ""
+            if "equipmentDetails" in entry and entry["equipmentDetails"]:
+                if isinstance(entry["equipmentDetails"], list) and len(entry["equipmentDetails"]) > 0:
+                    equipment_type = entry["equipmentDetails"][0].get("equipmentType", "")
+
+            reminder_data = {
+                "Customer Email": customer_email,
+                "Sales Person Emails": sales_person_emails,
+                "Customer Name": customer_name,
+                "Booking No": booking_no,
+                "SI Cutoff": si_cutoff_dt,
+                "Vessel": entry.get("vessel", ""),
+                "Voyage": entry.get("voyage", ""),
+                "FPOD": entry.get("fpod", ""),
+                "Equipment Type": equipment_type,
+                "Location": entry.get("location", "")
+            }
+
+            if customer_email not in si_cutoff_data:
+                si_cutoff_data[customer_email] = []
+            si_cutoff_data[customer_email].append(reminder_data)
+
+        return si_cutoff_data
+
+    except Exception as e:
+        print(f"Error fetching SI cutoff data: {str(e)}")
+        return {}
+
+def send_si_cutoff_reminder():
+    """
+    Send SI cutoff reminders 48 and 24 hours before the cutoff date.
+    """
+    try:
+        si_cutoff_data = fetch_si_cutoff_data()
+        if not si_cutoff_data:
+            print("No SI cutoff data found.")
+            return
+
+        now = datetime.now(pytz.timezone('Asia/Kolkata'))
+        print(f"Checking SI cutoff reminders at {now}")
+
+        for customer_email, bookings in si_cutoff_data.items():
+            for booking in bookings:
+                si_cutoff = booking["SI Cutoff"]
+                time_diff = si_cutoff - now
+                hours_diff = time_diff.total_seconds() / 3600
+
+                if hours_diff < 0:
+                    print(f"Skipping booking {booking['Booking No']} for {customer_email}: SI Cutoff at {si_cutoff} has already passed (hours remaining: {hours_diff})")
+                    continue
+
+                print(f"Booking {booking['Booking No']} for {customer_email}: SI Cutoff at {si_cutoff}, hours remaining: {hours_diff}")
+
+                reminder_type = None
+                if 47.5 <= hours_diff <= 48.5:
+                    reminder_type = "48 hours"
+                elif 23.5 <= hours_diff <= 24.5:
+                    reminder_type = "24 hours"
+
+                if reminder_type:
+                    sender_email, sender_password = get_sender_by_location(booking.get("Location", "MUMBAI"))
+                    msg = MIMEMultipart('alternative')
+                    msg['From'] = sender_email
+                    msg['To'] = customer_email
+                    msg['Cc'] = ", ".join(booking["Sales Person Emails"])
+                    msg['Subject'] = f"!! Reminder for Pending SI !! Booking No: {booking['Booking No']} // Vessel: {booking['Vessel']} // Customer Name: {booking['Customer Name']}"
+
+                    plain_body = f"""
+Dear Sir / Madam,
+
+Please note the SI cut-off for below shipment is nearing & request you to please send us the SI on info@dessertmarine.com without delays.
+
+Any change in shipment planning please notify CS team for timely roll-over.
+
+DO NOT REPLY ON THIS MAIL.
+
+Booking No: {booking['Booking No']}
+Equipment Type: {booking['Equipment Type']}
+FPOD: {booking['FPOD']}
+Vessel: {booking['Vessel']}
+Voyage: {booking['Voyage']}
+
+Note: This is System Generated email. If the SI is already submitted, please ignore & coordinate with doc team for the first print & further process.
+
+Thank you for your support.
+
+Regards,
+Dessert Marine Services (I) Pvt Ltd
+info@dessertmarine.com
+doc@dessertmarine.com
+"""
+                    msg.attach(MIMEText(plain_body, 'plain'))
+
+                    html_body = f"""
+<html>
+<body style="font-family: Arial, sans-serif;">
+    <p>Dear Sir / Madam,</p>
+    <p>Please note the SI cut-off for below shipment is nearing & request you to please send us the SI on <a href="mailto:info@dessertmarine.com">info@dessertmarine.com</a> without delays.</p>
+    <p>Any change in shipment planning please notify CS team for timely roll-over.</p>
+    <p><strong>DO NOT REPLY ON THIS MAIL.</strong></p>
+    <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse;">
+        <tr style="background-color: #f2f2f2;">
+            <th>Booking No</th>
+            <th>Equipment Type</th>
+            <th>FPOD</th>
+            <th>Vessel</th>
+            <th>Voyage</th>
+        </tr>
+        <tr>
+            <td>{booking['Booking No']}</td>
+            <td>{booking['Equipment Type'] if booking['Equipment Type'] else 'N/A'}</td>
+            <td>{booking['FPOD']}</td>
+            <td>{booking['Vessel']}</td>
+            <td>{booking['Voyage']}</td>
+        </tr>
+    </table>
+    <p><em>Note: This is System Generated email. If the SI is already submitted, please ignore & coordinate with doc team for the first print & further process.</em></p>
+    <p>Thank you for your support.</p>
+    <p>Regards,<br>
+    Dessert Marine Services (I) Pvt Ltd<br>
+    <a href="mailto:info@dessertmarine.com">info@dessertmarine.com</a><br>
+    <a href="mailto:doc@dessertmarine.com">doc@dessertmarine.com</a></p>
+</body>
+</html>
+"""
+                    msg.attach(MIMEText(html_body, 'html'))
+
+                    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+                        server.starttls()
+                        server.login(sender_email, sender_password)
+                        recipients = [customer_email] + booking["Sales Person Emails"]
+                        server.sendmail(sender_email, recipients, msg.as_string())
+                        print(f"SI Cutoff reminder ({reminder_type}) sent to {customer_email} (CC: {booking['Sales Person Emails']}) for booking {booking['Booking No']}")
+
+    except Exception as e:
+        print(f"Error sending SI cutoff reminders: {str(e)}")
+
+def fetch_pending_si_data():
+    """
+    Fetch bookings where SI cutoff is within the next 24 hours from 6:00 PM IST.
+    Returns a list of dictionaries with the required fields.
+    """
+    try:
+        bookings_ref = db.collection("entries")
+        docs = bookings_ref.stream()
+        pending_si_data = []
+
+        # Reference time: Today at 6:00 PM IST
+        now = datetime.now(pytz.timezone('Asia/Kolkata'))
+        reference_time = now.replace(hour=18, minute=0, second=0, microsecond=0)
+        if now.time() > reference_time.time():
+            # If current time is past 6:00 PM IST, use tomorrow's 6:00 PM IST as reference
+            reference_time = reference_time + timedelta(days=1)
+
+        for doc in docs:
+            entry = doc.to_dict()
+            entry["id"] = doc.id
+
+            si_cutoff = entry.get("siCutOff", "")
+            if not si_cutoff:
+                print(f"No SI cutoff found for entry {entry['id']}")
+                continue
+
+            si_cutoff_dt = parse_si_cutoff_date(si_cutoff)
+            if not si_cutoff_dt:
+                print(f"Invalid SI cutoff date for entry {entry['id']}: {si_cutoff}")
+                continue
+
+            # Calculate time difference from reference time (6:00 PM IST)
+            time_diff = si_cutoff_dt - reference_time
+            hours_diff = time_diff.total_seconds() / 3600
+
+            # Include only if SI cutoff is within the next 24 hours from reference time
+            if 0 <= hours_diff <= 24:
+                customer = entry.get("customer", {})
+                if not isinstance(customer, dict):
+                    print(f"Skipping entry {entry['id']}: 'customer' field is not a dictionary, found {type(customer)}: {customer}")
+                    continue
+
+                customer_name = customer.get("name", "")
+                booking_no = entry.get("bookingNo", "")
+                if not booking_no:
+                    print(f"No booking number found for entry {entry['id']}")
+                    continue
+
+                equipment_type = ""
+                if "equipmentDetails" in entry and entry["equipmentDetails"]:
+                    if isinstance(entry["equipmentDetails"], list) and len(entry["equipmentDetails"]) > 0:
+                        equipment_type = entry["equipmentDetails"][0].get("equipmentType", "")
+
+                etd = entry.get("etd", "")
+                if etd:
+                    try:
+                        etd = pd.to_datetime(etd).strftime('%d-%m-%Y')
+                    except Exception as e:
+                        print(f"Error parsing ETD for entry {entry['id']}: {e}")
+                        etd = ""
+
+                booking_data = {
+                    "Booking No": booking_no,
+                    "Customer": customer_name,
+                    "FPOD": entry.get("fpod", ""),
+                    "Equipment Type": equipment_type,
+                    "Vessel": entry.get("vessel", ""),
+                    "ETD": etd,
+                    "SI Cutoff": si_cutoff_dt.strftime('%d/%m/%Y %H:%M')  # For logging purposes
+                }
+                pending_si_data.append(booking_data)
+
+        return pending_si_data
+
+    except Exception as e:
+        print(f"Error fetching pending SI data: {str(e)}")
+        return []
+
+def generate_pending_si_excel(data):
+    """
+    Generate an Excel file with the pending SI data.
+    Returns the filename of the generated Excel file.
+    """
+    if not data:
+        print("No pending SI data to generate Excel report.")
+        return None
+
+    df = pd.DataFrame(data)
+    # Remove the SI Cutoff column from the Excel output (used only for logging)
+    if 'SI Cutoff' in df.columns:
+        df = df.drop(columns=['SI Cutoff'])
+    excel_filename = f"pending_si_report_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+    df.to_excel(excel_filename, index=False)
+    return excel_filename
+
+def send_pending_si_report():
+    """
+    Send a daily report at 6:00 PM IST with bookings where SI cutoff is within the next 24 hours.
+    Includes the records in the email body as an HTML table and attaches an Excel file.
+    """
+    try:
+        pending_si_data = fetch_pending_si_data()
+        if not pending_si_data:
+            print("No bookings with SI cutoff within the next 24 hours.")
+            return
+
+        # Log the fetched data for debugging
+        for booking in pending_si_data:
+            print(f"Pending SI booking: {booking}")
+
+        # Generate Excel file
+        excel_file = generate_pending_si_excel(pending_si_data)
+        if not excel_file:
+            print("Failed to generate Excel file for pending SI report.")
+            return
+
+        # Prepare the email
+        sender_email, sender_password = SENDER_EMAIL_MUMBAI, SENDER_PASSWORD_MUMBAI
+        msg = MIMEMultipart('alternative')
+        msg['From'] = sender_email
+        msg['To'] = ", ".join(["info@dessertmarine.com", "doc@dessertmarine.com"])
+        msg['Cc'] = "chirag@dessertmarine.com"
+        msg['Subject'] = f"PENDING SI : | {datetime.now().strftime('%Y-%m-%d')}"
+
+        # Plain text body (fallback)
+        plain_body = """
+Dear Team,
+
+Please find below the list of bookings with SI cutoff dates within the next 24 hours.
+
+"""
+        for booking in pending_si_data:
+            plain_body += f"""
+Booking No: {booking['Booking No']}
+Customer: {booking['Customer']}
+FPOD: {booking['FPOD']}
+Equipment Type: {booking['Equipment Type']}
+Vessel: {booking['Vessel']}
+ETD: {booking['ETD']}
+"""
+        plain_body += """
+An Excel file with the details is also attached.
+
+Note: This is an Auto Generated Mail.
+"""
+        msg.attach(MIMEText(plain_body, 'plain'))
+
+        # HTML body with table
+        html_body = f"""
+<html>
+<body style="font-family: Arial, sans-serif;">
+    <p>Dear Team,</p>
+    <p>Please find below the list of bookings with SI cutoff dates within the next 24 hours.</p>
+    <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse;">
+        <tr style="background-color: #f2f2f2;">
+            <th>Booking No</th>
+            <th>Customer</th>
+            <th>FPOD</th>
+            <th>Equipment Type</th>
+            <th>Vessel</th>
+            <th>ETD</th>
+        </tr>
+"""
+        for booking in pending_si_data:
+            html_body += f"""
+        <tr>
+            <td>{booking['Booking No']}</td>
+            <td>{booking['Customer']}</td>
+            <td>{booking['FPOD']}</td>
+            <td>{booking['Equipment Type'] if booking['Equipment Type'] else 'N/A'}</td>
+            <td>{booking['Vessel']}</td>
+            <td>{booking['ETD']}</td>
+        </tr>
+"""
+        html_body += """
+    </table>
+    <p>An Excel file with the details is also attached.</p>
+    <p><em>Note: This is an Auto Generated Mail.</em></p>
+</body>
+</html>
+"""
+        msg.attach(MIMEText(html_body, 'html'))
+
+        # Attach the Excel file
+        with open(excel_file, 'rb') as f:
+            attachment = MIMEApplication(f.read(), _subtype="xlsx")
+            attachment.add_header('Content-Disposition', 'attachment', filename=excel_file)
+            msg.attach(attachment)
+
+        # Send the email
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(sender_email, sender_password)
+            recipients = ["info@dessertmarine.com", "doc@dessertmarine.com", "chirag@dessertmarine.com"]
+            server.sendmail(sender_email, recipients, msg.as_string())
+            print(f"Pending SI report sent to {msg['To']} (CC: {msg['Cc']})")
+
+        # Clean up
+        os.remove(excel_file)
+
+    except Exception as e:
+        print(f"Error sending pending SI report: {str(e)}")
+
+def fetch_royal_castor_data():
+    """
+    Fetch bookings for Royal Castor where referenceNo exists.
+    Returns a list of dictionaries with the required fields.
+    """
+    try:
+        bookings_ref = db.collection("entries")
+        docs = bookings_ref.stream()
+        royal_castor_data = []
+
+        for doc in docs:
+            entry = doc.to_dict()
+            entry["id"] = doc.id
+
+            # Check if customer field is a dictionary
+            customer = entry.get("customer", {})
+            if not isinstance(customer, dict):
+                print(f"Skipping entry {entry['id']}: 'customer' field is not a dictionary, found {type(customer)}: {customer}")
+                continue
+
+            # Check if customer is Royal Castor (partial match)
+            customer_name = customer.get("name", "")
+            if "ROYAL CASTOR" in customer_name.upper():
+                print(f"Found Royal Castor booking: {entry['id']}, bookingNo: {entry.get('bookingNo', 'N/A')}")
+            else:
+                continue
+
+            # Check if referenceNo exists
+            reference_no = entry.get("referenceNo", "")
+            if not reference_no:
+                print(f"No referenceNo found for entry {entry['id']}")
+                continue
+
+            # Extract container number
+            container_no = ""
+            if "equipmentDetails" in entry and entry["equipmentDetails"]:
+                if isinstance(entry["equipmentDetails"], list):
+                    container_no = ", ".join(
+                        eq.get("containerNo", "") for eq in entry["equipmentDetails"] if eq.get("containerNo")
+                    )
+                else:
+                    print(f"Entry {entry['id']}: 'equipmentDetails' is not a list, found {type(entry['equipmentDetails'])}")
+                    container_no = entry.get("containerNo", "")
+            else:
+                container_no = entry.get("containerNo", "")
+
+            # Format ETD
+            etd = entry.get("etd", "")
+            if etd:
+                try:
+                    etd = pd.to_datetime(etd).strftime('%d-%m-%Y')
+                except Exception as e:
+                    print(f"Error parsing ETD for entry {entry['id']}: {e}")
+                    etd = ""
+
+            booking_data = {
+                "Customer": customer_name,
+                "Line": entry.get("line", ""),
+                "Reference No": reference_no,
+                "Booking No": entry.get("bookingNo", ""),
+                "Container No": container_no,
+                "Vessel": entry.get("vessel", ""),
+                "ETD": etd,
+                "Customer Email": customer.get("customerEmail", ["UJWALA@ROYALCASTOR.IN"])[0]  # Default email if not found
+            }
+            royal_castor_data.append(booking_data)
+
+        return royal_castor_data
+
+    except Exception as e:
+        print(f"Error fetching Royal Castor data: {str(e)}")
+        return []
+
+def send_royal_castor_vessel_update():
+    """
+    Send a daily vessel update email at 7:30 PM IST to Royal Castor for bookings with a referenceNo.
+    """
+    try:
+        royal_castor_data = fetch_royal_castor_data()
+        if not royal_castor_data:
+            print("No bookings for Royal Castor with referenceNo.")
+            return
+
+        # Log the fetched data for debugging
+        for booking in royal_castor_data:
+            print(f"Royal Castor booking: {booking}")
+
+        # Prepare the email
+        sender_email, sender_password = SENDER_EMAIL_MUMBAI, SENDER_PASSWORD_MUMBAI
+        customer_email = royal_castor_data[0]["Customer Email"]  # Use the email from the first record
+        msg = MIMEMultipart('alternative')
+        msg['From'] = sender_email
+        msg['To'] = customer_email
+        msg['Cc'] ="tanks@dessertmarine.com"
+        msg['Subject'] = f"Daily Vessel Update : {datetime.now().strftime('%Y-%m-%d')} || Royal Castor"
+
+        # Plain text body (fallback)
+        plain_body = """
+Dear Royal Castor Team,
+
+Please find below the daily vessel update.
+
+"""
+        for booking in royal_castor_data:
+            plain_body += f"""
+Customer: {booking['Customer']}
+Line: {booking['Line']}
+Reference No: {booking['Reference No']}
+Booking No: {booking['Booking No']}
+Container No: {booking['Container No']}
+Vessel: {booking['Vessel']}
+ETD: {booking['ETD']}
+"""
+        plain_body += """
+Note: This is an Auto Generated Mail.
+"""
+        msg.attach(MIMEText(plain_body, 'plain'))
+
+        # HTML body with table
+        html_body = f"""
+<html>
+<body style="font-family: Arial, sans-serif;">
+    <p>Dear Royal Castor Team,</p>
+    <p>Please find below the daily vessel update.</p>
+    <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse;">
+        <tr style="background-color: #f2f2f2;">
+            <th>Customer</th>
+            <th>Line</th>
+            <th>Reference No</th>
+            <th>Booking No</th>
+            <th>Container No</th>
+            <th>Vessel</th>
+            <th>ETD</th>
+        </tr>
+"""
+        for booking in royal_castor_data:
+            html_body += f"""
+        <tr>
+            <td>{booking['Customer']}</td>
+            <td>{booking['Line'] if booking['Line'] else 'N/A'}</td>
+            <td>{booking['Reference No']}</td>
+            <td>{booking['Booking No']}</td>
+            <td>{booking['Container No'] if booking['Container No'] else 'N/A'}</td>
+            <td>{booking['Vessel']}</td>
+            <td>{booking['ETD']}</td>
+        </tr>
+"""
+        html_body += """
+    </table>
+    <p><em>Note: This is an Auto Generated Mail.</em></p>
+</body>
+</html>
+"""
+        msg.attach(MIMEText(html_body, 'html'))
+
+        # Send the email
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(sender_email, sender_password)
+            recipients = [customer_email, "sales@dessertmarine.com"]
+            server.sendmail(sender_email, recipients, msg.as_string())
+            print(f"Royal Castor vessel update sent to {msg['To']} (CC: {msg['Cc']})")
+
+    except Exception as e:
+        print(f"Error sending Royal Castor vessel update: {str(e)}")
 
 @app.route('/api/send-sob-email', methods=['POST'])
 def send_sob_email():
     try:
-        # Log the incoming request data
         data = request.get_json()
         print(f"Received data: {data}")
 
-        # Extract email data
         customer_email = data.get('customer_email')
         sales_person_email = data.get('sales_person_email')
         customer_name = data.get('customer_name')
@@ -76,7 +639,6 @@ def send_sob_email():
         volume = data.get('volume')
         bl_no = data.get('bl_no', '')
 
-        # Handle case where emails might be lists
         if isinstance(customer_email, list):
             customer_email = customer_email[0] if customer_email else None
         if isinstance(sales_person_email, list):
@@ -86,7 +648,6 @@ def send_sob_email():
             print("Missing customer_email or sales_person_email")
             return jsonify({"error": "Customer or salesperson email missing"}), 400
 
-        # Handle container numbers with detailed logging
         print(f"Raw container_no: {container_no} (type: {type(container_no)})")
         if container_no is None:
             container_no_str = ""
@@ -98,17 +659,13 @@ def send_sob_email():
             container_no_str = str(container_no)
         print(f"Processed container_no_str: {container_no_str}")
 
-        # Create email
         msg = MIMEMultipart('alternative')
-        
-        # Choose sender email/password by location
         sender_email, sender_password = get_sender_by_location(data.get('location', ''))
         msg['From'] = sender_email
         msg['To'] = customer_email
         msg['Cc'] = sales_person_email
         msg['Subject'] = f"{customer_name} | SHIPPED ON BOARD | {vessel} | {booking_no} | {bl_no}"
 
-        # Plain text version (fallback)
         plain_body = f"""
 Dear Sir/Madam,
 
@@ -131,7 +688,6 @@ Note: This is an Auto Generated Mail.
 """
         msg.attach(MIMEText(plain_body, 'plain'))
 
-        # HTML version with table
         html_body = f"""
 <html>
 <body style="font-family: Arial, sans-serif;">
@@ -169,10 +725,7 @@ Note: This is an Auto Generated Mail.
 """
         msg.attach(MIMEText(html_body, 'html'))
 
-        # Log before sending email
         print(f"Attempting to send email from {sender_email} to {customer_email} with CC {sales_person_email}")
-
-        # Connect to SMTP server
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
             server.starttls()
             print("TLS started")
@@ -188,43 +741,28 @@ Note: This is an Auto Generated Mail.
         return jsonify({"error": str(e)}), 500
 
 def fetch_bookings_by_salesperson():
-    """
-    Fetch all bookings from Firestore and group them by salesperson.
-    Returns a dictionary with salesperson emails as keys and lists of bookings as values.
-    """
     try:
         bookings_ref = db.collection("entries")
         docs = bookings_ref.stream()
-
-        # Dictionary to store bookings by salesperson email
         bookings_by_salesperson = {}
 
         for doc in docs:
             entry = doc.to_dict()
             entry["id"] = doc.id
-
-            # Debug: Print the entire entry to inspect its structure
             print(f"Entry {entry['id']}: {entry}")
 
-            # Extract customer field
             customer = entry.get("customer", {})
-            
-            # Check if customer is a dictionary
             if not isinstance(customer, dict):
                 print(f"Skipping entry {entry['id']}: 'customer' field is not a dictionary, found {type(customer)}: {customer}")
                 continue
 
-            # Extract salesperson email(s) from the customer map
             sales_person_emails = customer.get("salesPersonEmail", [])
-
             if not sales_person_emails:
                 print(f"No salesperson email found for entry {entry['id']}")
                 continue
 
-            # Extract container number from equipmentDetails or directly
             container_no = ""
             if "equipmentDetails" in entry and entry["equipmentDetails"]:
-                # Ensure equipmentDetails is a list
                 if isinstance(entry["equipmentDetails"], list):
                     container_no = ", ".join(
                         eq["containerNo"] for eq in entry["equipmentDetails"] if eq.get("containerNo")
@@ -234,7 +772,6 @@ def fetch_bookings_by_salesperson():
             else:
                 container_no = entry.get("containerNo", "")
 
-            # Prepare booking data
             booking_data = {
                 "Customer Name": customer.get("name", ""),
                 "Sales Person": customer.get("salesPerson", ""),
@@ -250,17 +787,12 @@ def fetch_bookings_by_salesperson():
                 "BL No": entry.get("blNo", ""),
                 "Booking Date": entry.get("bookingDate", ""),
                 "ETD": entry.get("etd", ""),
-                "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "Pending SI": "Yes" if not entry.get("siFiled", False) else "No",
+                "Pending BL": "Yes" if not entry.get("blReleased", False) else "No",
+                "Location": entry.get("location", "")
             }
 
-            # Add pending SI and pending BL fields
-            booking_data["Pending SI"] = "Yes" if not entry.get("siFiled", False) else "No"
-            booking_data["Pending BL"] = "Yes" if not entry.get("blReleased", False) else "No"
-
-            # Add location to booking data
-            booking_data["Location"] = entry.get("location", "")
-
-            # Add booking to each salesperson's list, grouped by location
             for email in sales_person_emails:
                 if email:
                     if email not in bookings_by_salesperson:
@@ -277,39 +809,27 @@ def fetch_bookings_by_salesperson():
         return {}
 
 def generate_excel_report(salesperson_email, bookings):
-    """
-    Generate an Excel report for a salesperson's bookings.
-    Returns the filename of the generated Excel file.
-    """
     if not bookings:
         print(f"No bookings found for salesperson {salesperson_email}")
         return None
 
-    # Create a DataFrame
     df = pd.DataFrame(bookings)
-    # Sort first by Customer Name (alphabetically), then by ETD (earliest first)
     if not df.empty:
         df = df.sort_values(by=["Customer Name", "ETD"], ascending=[True, True], key=lambda col: col.str.lower() if col.dtype == object else col)
-    # Format date columns to dd-mm-yyyy
     date_columns = [col for col in df.columns if 'date' in col.lower() or col.upper() == 'ETD']
     for col in date_columns:
         df[col] = pd.to_datetime(df[col], errors='coerce').dt.strftime('%d-%m-%Y')
-    # Generate Excel file
     excel_filename = f"booking_report_{salesperson_email.split('@')[0]}_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
     df.to_excel(excel_filename, index=False)
     return excel_filename
 
 def send_daily_report():
-    """
-    Send a daily report to each salesperson with their bookings, grouped by location.
-    """
     try:
         bookings_by_salesperson = fetch_bookings_by_salesperson()
         if not bookings_by_salesperson:
             print("No bookings found for any salesperson.")
             return
         for salesperson_email, loc_dict in bookings_by_salesperson.items():
-            # Combine all bookings for this salesperson across all locations
             all_bookings = []
             for location, bookings in loc_dict.items():
                 all_bookings.extend(bookings)
@@ -319,13 +839,11 @@ def send_daily_report():
             excel_file = generate_excel_report(salesperson_email, all_bookings)
             if not excel_file:
                 continue
-            # Use Mumbai sender for now (or pick by first booking location if needed)
             sender_email, sender_password = get_sender_by_location(all_bookings[0].get('Location', ''))
             msg = MIMEMultipart()
             msg['From'] = sender_email
             msg['Subject'] = f"Daily Booking Report - {datetime.now().strftime('%Y-%m-%d')}"
 
-            # Parse all sales person emails (comma-separated or list)
             all_sales_emails = []
             if isinstance(salesperson_email, str):
                 all_sales_emails = [e.strip() for e in salesperson_email.split(',') if e.strip()]
@@ -359,22 +877,27 @@ Note: This is an Auto Generated Mail.
     except Exception as e:
         print(f"Error sending daily reports: {str(e)}")
 
-# Schedule the daily report at 8 PM IST
-# Current time is 11:00 AM IST on June 13, 2025, so the report will run at 8 PM today
-schedule.every().day.at("17:21").do(send_daily_report)
+# Schedule tasks
+schedule.every().day.at("17:21").do(send_daily_report)  # 8:00 PM IST (Daily Report)
+schedule.every().hour.do(send_si_cutoff_reminder)  # SI Cutoff Reminders every hour
+schedule.every().day.at("12:30").do(send_pending_si_report)  # 6:00 PM IST (Pending SI Report)
+schedule.every().day.at("12:16").do(send_royal_castor_vessel_update)  # 7:30 PM IST (Royal Castor Vessel Update)
 
-# Function to run the scheduler in a separate thread
 def run_scheduler():
     while True:
         schedule.run_pending()
-        time.sleep(60)  # Check every minute
+        time.sleep(60)
 
 if __name__ == '__main__':
-    print(f"Starting server with SENDER_EMAIL_MUMBAI: {SENDER_EMAIL_MUMBAI}")
-    
-    # Start the scheduler in a separate thread
-    scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
-    scheduler_thread.start()
-    
-    # Start the Flask app
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    import os
+    # Use an environment variable to control scheduler (set RUN_SCHEDULER=true for worker process)
+    if os.environ.get('RUN_SCHEDULER', 'false').lower() == 'true':
+        print(f"[WORKER] Starting scheduler with SENDER_EMAIL_MUMBAI: {SENDER_EMAIL_MUMBAI}")
+        scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+        scheduler_thread.start()
+        # Keep the worker process alive
+        while True:
+            time.sleep(3600)
+    else:
+        print(f"[WEB] Starting Flask app with SENDER_EMAIL_MUMBAI: {SENDER_EMAIL_MUMBAI}")
+        app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
