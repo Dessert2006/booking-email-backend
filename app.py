@@ -22,7 +22,7 @@ app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": ["http://localhost:3000", "https://booking-report.vercel.app"]}})
 
 # Initialize Firestore
-credential_path = os.path.join(os.path.dirname(__file__), "firebase-admin-sdk.json")
+credential_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", os.path.join(os.path.dirname(__file__), "firebase-admin-sdk.json"))
 if not os.path.exists(credential_path):
     raise FileNotFoundError(f"Firebase credentials file not found at: {credential_path}")
 
