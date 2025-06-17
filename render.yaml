@@ -3,8 +3,8 @@ services:
     name: bookingreport-backend-web
     env: python
     plan: free
-    buildCommand: pip install -r backend/requirements.txt
-    startCommand: python backend/app.py
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
     envVars:
       - key: PORT
         value: 10000
@@ -13,6 +13,6 @@ services:
     name: bookingreport-backend-scheduler
     env: python
     plan: free
-    buildCommand: pip install -r backend/requirements.txt
-    startCommand: RUN_SCHEDULER=true python backend/app.py
+    buildCommand: pip install -r requirements.txt
+    startCommand: RUN_SCHEDULER=true python app.py
     envVars: []
