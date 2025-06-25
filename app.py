@@ -338,7 +338,6 @@ def generate_pending_si_excel(data):
         return None
 
     df = pd.DataFrame(data)
-    # Remove the SI Cutoff column from the Excel output (used only for logging)
     if 'SI Cutoff' in df.columns:
         df = df.drop(columns=['SI Cutoff'])
     excel_filename = f"pending_si_report_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
@@ -356,17 +355,14 @@ def send_pending_si_report():
             print("No bookings with SI cutoff within the next 24 hours.")
             return
 
-        # Log the fetched data for debugging
         for booking in pending_si_data:
             print(f"Pending SI booking: {booking}")
 
-        # Generate Excel file
         excel_file = generate_pending_si_excel(pending_si_data)
         if not excel_file:
             print("Failed to generate Excel file for pending SI report.")
             return
 
-        # Prepare the email
         sender_email, sender_password = SENDER_EMAIL_MUMBAI, SENDER_PASSWORD_MUMBAI
         msg = MIMEMultipart('alternative')
         msg['From'] = sender_email
@@ -374,7 +370,6 @@ def send_pending_si_report():
         msg['Cc'] = "chirag@dessertmarine.com"
         msg['Subject'] = f"PENDING SI : | {datetime.now().strftime('%Y-%m-%d')}"
 
-        # Plain text body (fallback)
         plain_body = """
 Dear Team,
 
@@ -397,7 +392,6 @@ Note: This is an Auto Generated Mail.
 """
         msg.attach(MIMEText(plain_body, 'plain'))
 
-        # HTML body with table
         html_body = f"""
 <html>
 <body style="font-family: Arial, sans-serif;">
@@ -433,13 +427,11 @@ Note: This is an Auto Generated Mail.
 """
         msg.attach(MIMEText(html_body, 'html'))
 
-        # Attach the Excel file
         with open(excel_file, 'rb') as f:
             attachment = MIMEApplication(f.read(), _subtype="xlsx")
             attachment.add_header('Content-Disposition', 'attachment', filename=excel_file)
             msg.attach(attachment)
 
-        # Send the email
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
             server.starttls()
             server.login(sender_email, sender_password)
@@ -447,7 +439,6 @@ Note: This is an Auto Generated Mail.
             server.sendmail(sender_email, recipients, msg.as_string())
             print(f"Pending SI report sent to {msg['To']} (CC: {msg['Cc']})")
 
-        # Clean up
         os.remove(excel_file)
 
     except Exception as e:
@@ -467,26 +458,22 @@ def fetch_royal_castor_data():
             entry = doc.to_dict()
             entry["id"] = doc.id
 
-            # Check if customer field is a dictionary
             customer = entry.get("customer", {})
             if not isinstance(customer, dict):
                 print(f"Skipping entry {entry['id']}: 'customer' field is not a dictionary, found {type(customer)}: {customer}")
                 continue
 
-            # Check if customer is Royal Castor (partial match)
             customer_name = customer.get("name", "")
             if "ROYAL CASTOR" in customer_name.upper():
                 print(f"Found Royal Castor booking: {entry['id']}, bookingNo: {entry.get('bookingNo', 'N/A')}")
             else:
                 continue
 
-            # Check if referenceNo exists
             reference_no = entry.get("referenceNo", "")
             if not reference_no:
                 print(f"No referenceNo found for entry {entry['id']}")
                 continue
 
-            # Extract container number
             container_no = ""
             if "equipmentDetails" in entry and entry["equipmentDetails"]:
                 if isinstance(entry["equipmentDetails"], list):
@@ -496,10 +483,7 @@ def fetch_royal_castor_data():
                 else:
                     print(f"Entry {entry['id']}: 'equipmentDetails' is not a list, found {type(entry['equipmentDetails'])}")
                     container_no = entry.get("containerNo", "")
-            else:
-                container_no = entry.get("containerNo", "")
 
-            # Format ETD
             etd = entry.get("etd", "")
             if etd:
                 try:
@@ -516,7 +500,7 @@ def fetch_royal_castor_data():
                 "Container No": container_no,
                 "Vessel": entry.get("vessel", ""),
                 "ETD": etd,
-                "Customer Email": customer.get("customerEmail", ["UJWALA@ROYALCASTOR.IN"])[0]  # Default email if not found
+                "Customer Email": customer.get("customerEmail", ["UJWALA@ROYALCASTOR.IN"])[0]
             }
             royal_castor_data.append(booking_data)
 
@@ -536,20 +520,17 @@ def send_royal_castor_vessel_update():
             print("No bookings for Royal Castor with referenceNo.")
             return
 
-        # Log the fetched data for debugging
         for booking in royal_castor_data:
             print(f"Royal Castor booking: {booking}")
 
-        # Prepare the email
         sender_email, sender_password = SENDER_EMAIL_MUMBAI, SENDER_PASSWORD_MUMBAI
-        customer_email = royal_castor_data[0]["Customer Email"]  # Use the email from the first record
+        customer_email = royal_castor_data[0]["Customer Email"]
         msg = MIMEMultipart('alternative')
         msg['From'] = sender_email
         msg['To'] = customer_email
-        msg['Cc'] ="tanks@dessertmarine.com"
+        msg['Cc'] = "tanks@dessertmarine.com"
         msg['Subject'] = f"Daily Vessel Update : {datetime.now().strftime('%Y-%m-%d')} || Royal Castor"
 
-        # Plain text body (fallback)
         plain_body = """
 Dear Royal Castor Team,
 
@@ -571,7 +552,6 @@ Note: This is an Auto Generated Mail.
 """
         msg.attach(MIMEText(plain_body, 'plain'))
 
-        # HTML body with table
         html_body = f"""
 <html>
 <body style="font-family: Arial, sans-serif;">
@@ -608,7 +588,6 @@ Note: This is an Auto Generated Mail.
 """
         msg.attach(MIMEText(html_body, 'html'))
 
-        # Send the email
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
             server.starttls()
             server.login(sender_email, sender_password)
@@ -652,7 +631,7 @@ def send_sob_email():
         if container_no is None:
             container_no_str = ""
         elif isinstance(container_no, list):
-            container_no_str = ", ".join(str(c) for c in container_no) if container_no else ""
+            container_no_str = ", ".join(str(c) for c in container_no if c) if container_no else ""
         elif isinstance(container_no, str):
             container_no_str = container_no
         else:
@@ -738,6 +717,102 @@ Note: This is an Auto Generated Mail.
 
     except Exception as e:
         print(f"Error sending email: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/send-selling-email', methods=['POST'])
+def send_selling_email():
+    try:
+        data = request.get_json()
+        print(f"Received data for selling email: {data}")
+
+        bl_no = data.get('bl_no', '')
+        booking_no = data.get('booking_no', '')
+        customer_name = data.get('customer_name', '')
+        pol = data.get('pol', '')
+        fpod = data.get('fpod', '')
+        volume = data.get('volume', '')
+        buy_rate = data.get('buy_rate', '')
+        sell_rate = data.get('sell_rate', '')
+        sales_person_email = data.get('sales_person_email', [])
+        location = data.get('location', 'MUMBAI')
+
+        if isinstance(sales_person_email, list):
+            sales_person_email = sales_person_email[0] if sales_person_email else None
+
+        if not sales_person_email:
+            print("Missing sales_person_email")
+            return jsonify({"error": "Salesperson email missing"}), 400
+
+        msg = MIMEMultipart('alternative')
+        sender_email, sender_password = get_sender_by_location(location)
+        msg['From'] = sender_email
+        msg['To'] = ", ".join(["manas.jadhav.7779@gmail.com", "tech.manasjadhav@gmail.com"])
+        msg['Cc'] = sales_person_email
+        msg['Subject'] = f"Selling | {bl_no}"
+
+        plain_body = f"""
+Dear Team,
+
+Please find below the details for the selling rate:
+
+BL/NO: {bl_no}
+BOOKING NO: {booking_no}
+CUSTOMER: {customer_name}
+POL: {pol}
+FPOD: {fpod}
+VOLUME: {volume}
+BUY RATE: {buy_rate}
+SELL RATE: {sell_rate}
+
+Note: This is an Auto Generated Mail.
+"""
+        msg.attach(MIMEText(plain_body, 'plain'))
+
+        html_body = f"""
+<html>
+<body style="font-family: Arial, sans-serif;">
+    <p>Dear Team,</p>
+    <p>Please find below the details for the selling rate:</p>
+    <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse;">
+        <tr style="background-color: #f2f2f2;">
+            <th>BL/NO</th>
+            <th>BOOKING NO</th>
+            <th>CUSTOMER</th>
+            <th>POL</th>
+            <th>FPOD</th>
+            <th>VOLUME</th>
+            <th>BUY RATE</th>
+            <th>SELL RATE</th>
+        </tr>
+        <tr>
+            <td>{bl_no}</td>
+            <td>{booking_no}</td>
+            <td>{customer_name}</td>
+            <td>{pol}</td>
+            <td>{fpod}</td>
+            <td>{volume}</td>
+            <td>{buy_rate}</td>
+            <td>{sell_rate}</td>
+        </tr>
+    </table>
+    <p><em>Note: This is an Auto Generated Mail.</em></p>
+</body>
+</html>
+"""
+        msg.attach(MIMEText(html_body, 'html'))
+
+        print(f"Attempting to send selling email from {sender_email} to {msg['To']} with CC {sales_person_email}")
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(sender_email, sender_password)
+            recipients = ["manas.jadhav.7779@gmail.com", "tech.manasjadhav@gmail.com", sales_person_email]
+            server.sendmail(sender_email, recipients, msg.as_string())
+            print("Selling email sent successfully")
+
+        return jsonify({"message": "Selling email sent successfully"}), 200
+
+    except Exception as e:
+        print(f"Error sending selling email: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 def fetch_bookings_by_salesperson():
@@ -878,10 +953,10 @@ Note: This is an Auto Generated Mail.
         print(f"Error sending daily reports: {str(e)}")
 
 # Schedule tasks
-schedule.every().day.at("17:21").do(send_daily_report)  # 8:00 PM IST (Daily Report)
-schedule.every().hour.do(send_si_cutoff_reminder)  # SI Cutoff Reminders every hour
-schedule.every().day.at("12:30").do(send_pending_si_report)  # 6:00 PM IST (Pending SI Report)
-schedule.every().day.at("12:16").do(send_royal_castor_vessel_update)  # 7:30 PM IST (Royal Castor Vessel Update)
+schedule.every().day.at("17:21").do(send_daily_report)
+schedule.every().hour.do(send_si_cutoff_reminder)
+schedule.every().day.at("12:30").do(send_pending_si_report)
+schedule.every().day.at("12:16").do(send_royal_castor_vessel_update)
 
 def run_scheduler():
     while True:
@@ -890,12 +965,10 @@ def run_scheduler():
 
 if __name__ == '__main__':
     import os
-    # Use an environment variable to control scheduler (set RUN_SCHEDULER=true for worker process)
     if os.environ.get('RUN_SCHEDULER', 'false').lower() == 'true':
         print(f"[WORKER] Starting scheduler with SENDER_EMAIL_MUMBAI: {SENDER_EMAIL_MUMBAI}")
         scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
         scheduler_thread.start()
-        # Keep the worker process alive
         while True:
             time.sleep(3600)
     else:

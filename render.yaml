@@ -14,5 +14,5 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: RUN_SCHEDULER=true python app.py
+    startCommand: python scheduler.py
     envVars: []
