@@ -3,9 +3,9 @@ import schedule
 import time
 
 # Schedule tasks
-schedule.every().day.at("18:00").do(send_daily_report)
-schedule.every().day.at("18:00").do(send_pending_si_report)
-schedule.every().day.at("18:00").do(send_royal_castor_vessel_update)
+schedule.every().day.at("19:00").do(send_daily_report)
+schedule.every().day.at("19:00").do(send_pending_si_report)
+schedule.every().day.at("19:00").do(send_royal_castor_vessel_update)
 
 def run_scheduler():
     while True:
