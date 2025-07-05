@@ -953,10 +953,10 @@ Note: This is an Auto Generated Mail.
         print(f"Error sending daily reports: {str(e)}")
 
 # Schedule tasks
-schedule.every().day.at("17:21").do(send_daily_report)
+schedule.every().day.at("19:00").do(send_daily_report)
 schedule.every().hour.do(send_si_cutoff_reminder)
-schedule.every().day.at("12:30").do(send_pending_si_report)
-schedule.every().day.at("12:16").do(send_royal_castor_vessel_update)
+schedule.every().day.at("18:00").do(send_pending_si_report)
+schedule.every().day.at("19:00").do(send_royal_castor_vessel_update)
 
 def run_scheduler():
     while True:
