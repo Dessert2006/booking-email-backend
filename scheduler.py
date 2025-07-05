@@ -29,9 +29,9 @@ def run_send_royal_castor_vessel_update():
         print(f"[SCHEDULER] Error in send_royal_castor_vessel_update: {e}")
 
 # Schedule tasks
-schedule.every().day.at("13:35").do(run_send_daily_report)
-schedule.every().day.at("13:35").do(run_send_pending_si_report)
-schedule.every().day.at("13:35").do(run_send_royal_castor_vessel_update)
+schedule.every().day.at("13:40").do(run_send_daily_report)
+schedule.every().day.at("13:40").do(run_send_pending_si_report)
+schedule.every().day.at("13:40").do(run_send_royal_castor_vessel_update)
 
 def run_scheduler():
     while True:
