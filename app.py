@@ -33,11 +33,14 @@ db = firestore.client()
 # Email configuration
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
-SENDER_EMAIL_MUMBAI = "tanks@dessertmarine.com"
-SENDER_PASSWORD_MUMBAI = "awou kyet gbgs btud"
+SENDER_EMAIL_MUMBAI = "info@dessertmarine.com"
+SENDER_PASSWORD_MUMBAI = "gsxb yivs dscy hkrk"
+SENDER_EMAIL_GUJARAT = "mundra@dessertmarine.com"  # Add your Gujarat sender email
+SENDER_PASSWORD_GUJARAT = "lxru bkiv jsvr dyik"     # Add your Gujarat sender password
 
 BRANCH_EMAILS = {
     "MUMBAI": (SENDER_EMAIL_MUMBAI, SENDER_PASSWORD_MUMBAI),
+    "GUJARAT": (SENDER_EMAIL_GUJARAT, SENDER_PASSWORD_GUJARAT),
 }
 
 def get_sender_by_location(location):
@@ -45,6 +48,8 @@ def get_sender_by_location(location):
         loc = location.strip().upper()
         if "MUMBAI" in loc:
             return SENDER_EMAIL_MUMBAI, SENDER_PASSWORD_MUMBAI
+        if "GUJARAT" in loc:
+            return SENDER_EMAIL_GUJARAT, SENDER_PASSWORD_GUJARAT
     return SENDER_EMAIL_MUMBAI, SENDER_PASSWORD_MUMBAI
 
 def parse_si_cutoff_date(si_cutoff):
@@ -528,7 +533,7 @@ def send_royal_castor_vessel_update():
         msg = MIMEMultipart('alternative')
         msg['From'] = sender_email
         msg['To'] = customer_email
-        msg['Cc'] = "tanks@dessertmarine.com"
+        msg['Cc'] = "info@dessertmarine.com"
         msg['Subject'] = f"Daily Vessel Update : {datetime.now().strftime('%Y-%m-%d')} || Royal Castor"
 
         plain_body = """
