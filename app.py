@@ -118,10 +118,8 @@ def fetch_si_cutoff_data():
                 print(f"No booking number found for entry {entry['id']}")
                 continue
 
-            equipment_type = ""
-            if "equipmentDetails" in entry and entry["equipmentDetails"]:
-                if isinstance(entry["equipmentDetails"], list) and len(entry["equipmentDetails"]) > 0:
-                    equipment_type = entry["equipmentDetails"][0].get("equipmentType", "")
+            # Use volume instead of equipment_type
+            volume = entry.get("volume", "")
 
             reminder_data = {
                 "Customer Email": customer_email,
@@ -132,7 +130,7 @@ def fetch_si_cutoff_data():
                 "Vessel": entry.get("vessel", ""),
                 "Voyage": entry.get("voyage", ""),
                 "FPOD": entry.get("fpod", ""),
-                "Equipment Type": equipment_type,
+                "Volume": volume,
                 "Location": entry.get("location", "")
             }
 
@@ -195,7 +193,8 @@ Any change in shipment planning please notify CS team for timely roll-over.
 DO NOT REPLY ON THIS MAIL.
 
 Booking No: {booking['Booking No']}
-Equipment Type: {booking['Equipment Type']}
+SI Cutoff: {booking['SI Cutoff'].strftime('%d/%m/%Y %H:%M') if booking['SI Cutoff'] else 'N/A'}
+Volume: {booking['Volume']}
 FPOD: {booking['FPOD']}
 Vessel: {booking['Vessel']}
 Voyage: {booking['Voyage']}
@@ -221,14 +220,16 @@ doc@dessertmarine.com
     <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse;">
         <tr style="background-color: #f2f2f2;">
             <th>Booking No</th>
-            <th>Equipment Type</th>
+            <th>SI Cutoff</th>
+            <th>Volume</th>
             <th>FPOD</th>
             <th>Vessel</th>
             <th>Voyage</th>
         </tr>
         <tr>
             <td>{booking['Booking No']}</td>
-            <td>{booking['Equipment Type'] if booking['Equipment Type'] else 'N/A'}</td>
+            <td>{booking['SI Cutoff'].strftime('%d/%m/%Y %H:%M') if booking['SI Cutoff'] else 'N/A'}</td>
+            <td>{booking['Volume'] if booking['Volume'] else 'N/A'}</td>
             <td>{booking['FPOD']}</td>
             <td>{booking['Vessel']}</td>
             <td>{booking['Voyage']}</td>
@@ -958,10 +959,10 @@ Note: This is an Auto Generated Mail.
         print(f"Error sending daily reports: {str(e)}")
 
 # Schedule tasks
-schedule.every().day.at("19:00").do(send_daily_report)
+#schedule.every().day.at("13:30").do(send_daily_report)
 schedule.every().hour.do(send_si_cutoff_reminder)
-schedule.every().day.at("18:00").do(send_pending_si_report)
-schedule.every().day.at("19:00").do(send_royal_castor_vessel_update)
+#schedule.every().day.at("12:30").do(send_pending_si_report)
+#schedule.every().day.at("13:30").do(send_royal_castor_vessel_update)
 
 def run_scheduler():
     while True:
