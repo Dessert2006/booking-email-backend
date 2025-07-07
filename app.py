@@ -35,8 +35,8 @@ SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 SENDER_EMAIL_MUMBAI = "info@dessertmarine.com"
 SENDER_PASSWORD_MUMBAI = "gsxb yivs dscy hkrk"
-SENDER_EMAIL_GUJARAT = "mundra@dessertmarine.com"  # Add your Gujarat sender email
-SENDER_PASSWORD_GUJARAT = "lxru bkiv jsvr dyik"     # Add your Gujarat sender password
+SENDER_EMAIL_GUJARAT = "mundra@dessertmarine.com"
+SENDER_PASSWORD_GUJARAT = "lxru bkiv jsvr dyik"
 
 BRANCH_EMAILS = {
     "MUMBAI": (SENDER_EMAIL_MUMBAI, SENDER_PASSWORD_MUMBAI),
@@ -118,7 +118,6 @@ def fetch_si_cutoff_data():
                 print(f"No booking number found for entry {entry['id']}")
                 continue
 
-            # Use volume instead of equipment_type
             volume = entry.get("volume", "")
 
             reminder_data = {
@@ -131,7 +130,8 @@ def fetch_si_cutoff_data():
                 "Voyage": entry.get("voyage", ""),
                 "FPOD": entry.get("fpod", ""),
                 "Volume": volume,
-                "Location": entry.get("location", "")
+                "Location": entry.get("location", ""),
+                "POL": entry.get("pol", "")
             }
 
             if customer_email not in si_cutoff_data:
@@ -195,6 +195,7 @@ DO NOT REPLY ON THIS MAIL.
 Booking No: {booking['Booking No']}
 SI Cutoff: {booking['SI Cutoff'].strftime('%d/%m/%Y %H:%M') if booking['SI Cutoff'] else 'N/A'}
 Volume: {booking['Volume']}
+POL: {booking['POL']}
 FPOD: {booking['FPOD']}
 Vessel: {booking['Vessel']}
 Voyage: {booking['Voyage']}
@@ -222,6 +223,7 @@ doc@dessertmarine.com
             <th>Booking No</th>
             <th>SI Cutoff</th>
             <th>Volume</th>
+            <th>POL</th>
             <th>FPOD</th>
             <th>Vessel</th>
             <th>Voyage</th>
@@ -230,6 +232,7 @@ doc@dessertmarine.com
             <td>{booking['Booking No']}</td>
             <td>{booking['SI Cutoff'].strftime('%d/%m/%Y %H:%M') if booking['SI Cutoff'] else 'N/A'}</td>
             <td>{booking['Volume'] if booking['Volume'] else 'N/A'}</td>
+            <td>{booking['POL'] if booking['POL'] else 'N/A'}</td>
             <td>{booking['FPOD']}</td>
             <td>{booking['Vessel']}</td>
             <td>{booking['Voyage']}</td>
@@ -266,11 +269,9 @@ def fetch_pending_si_data():
         docs = bookings_ref.stream()
         pending_si_data = []
 
-        # Reference time: Today at 6:00 PM IST
         now = datetime.now(pytz.timezone('Asia/Kolkata'))
         reference_time = now.replace(hour=18, minute=0, second=0, microsecond=0)
         if now.time() > reference_time.time():
-            # If current time is past 6:00 PM IST, use tomorrow's 6:00 PM IST as reference
             reference_time = reference_time + timedelta(days=1)
 
         for doc in docs:
@@ -287,11 +288,9 @@ def fetch_pending_si_data():
                 print(f"Invalid SI cutoff date for entry {entry['id']}: {si_cutoff}")
                 continue
 
-            # Calculate time difference from reference time (6:00 PM IST)
             time_diff = si_cutoff_dt - reference_time
             hours_diff = time_diff.total_seconds() / 3600
 
-            # Include only if SI cutoff is within the next 24 hours from reference time
             if 0 <= hours_diff <= 24:
                 customer = entry.get("customer", {})
                 if not isinstance(customer, dict):
@@ -324,7 +323,7 @@ def fetch_pending_si_data():
                     "Equipment Type": equipment_type,
                     "Vessel": entry.get("vessel", ""),
                     "ETD": etd,
-                    "SI Cutoff": si_cutoff_dt.strftime('%d/%m/%Y %H:%M')  # For logging purposes
+                    "SI Cutoff": si_cutoff_dt.strftime('%d/%m/%Y %H:%M')
                 }
                 pending_si_data.append(booking_data)
 
@@ -623,13 +622,23 @@ def send_sob_email():
         container_no = data.get('container_no')
         volume = data.get('volume')
         bl_no = data.get('bl_no', '')
+        location = data.get('location', 'MUMBAI')
 
+        # Handle customer_email as a list or single string
+        customer_emails = []
         if isinstance(customer_email, list):
-            customer_email = customer_email[0] if customer_email else None
+            customer_emails = [email.strip() for email in customer_email if email.strip()]
+        elif isinstance(customer_email, str) and customer_email.strip():
+            customer_emails = [customer_email.strip()]
+        
+        # Handle sales_person_email as a list or single string
+        sales_person_emails = []
         if isinstance(sales_person_email, list):
-            sales_person_email = sales_person_email[0] if sales_person_email else None
-
-        if not customer_email or not sales_person_email:
+            sales_person_emails = [email.strip() for email in sales_person_email if email.strip()]
+        elif isinstance(sales_person_email, str) and sales_person_email.strip():
+            sales_person_emails = [sales_person_email.strip()]
+        
+        if not customer_emails or not sales_person_emails:
             print("Missing customer_email or sales_person_email")
             return jsonify({"error": "Customer or salesperson email missing"}), 400
 
@@ -645,10 +654,10 @@ def send_sob_email():
         print(f"Processed container_no_str: {container_no_str}")
 
         msg = MIMEMultipart('alternative')
-        sender_email, sender_password = get_sender_by_location(data.get('location', ''))
+        sender_email, sender_password = get_sender_by_location(location)
         msg['From'] = sender_email
-        msg['To'] = customer_email
-        msg['Cc'] = sales_person_email
+        msg['To'] = ", ".join(customer_emails)
+        msg['Cc'] = ", ".join(sales_person_emails)
         msg['Subject'] = f"{customer_name} | SHIPPED ON BOARD | {vessel} | {booking_no} | {bl_no}"
 
         plain_body = f"""
@@ -710,13 +719,14 @@ Note: This is an Auto Generated Mail.
 """
         msg.attach(MIMEText(html_body, 'html'))
 
-        print(f"Attempting to send email from {sender_email} to {customer_email} with CC {sales_person_email}")
+        print(f"Attempting to send email from {sender_email} to {customer_emails} with CC {sales_person_emails}")
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
             server.starttls()
             print("TLS started")
             server.login(sender_email, sender_password)
             print("Login successful")
-            server.sendmail(sender_email, [customer_email, sales_person_email], msg.as_string())
+            recipients = customer_emails + sales_person_emails
+            server.sendmail(sender_email, recipients, msg.as_string())
             print("Email sent successfully")
 
         return jsonify({"message": "Email sent successfully"}), 200
