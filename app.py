@@ -96,17 +96,19 @@ def fetch_si_cutoff_data():
                 print(f"Skipping entry {entry['id']}: 'customer' field is not a dictionary, found {type(customer)}: {customer}")
                 continue
 
-            customer_email = customer.get("customerEmail", [])
-            if not customer_email:
+            customer_emails = customer.get("customerEmail", [])
+            if not customer_emails:
                 print(f"No customer email found for entry {entry['id']}")
                 continue
-            customer_email = customer_email[0] if isinstance(customer_email, list) else customer_email
-            print(f"Fetched customer email for booking {entry.get('bookingNo', entry['id'])}: {customer_email}")
+            # Use all customer emails instead of just the first one
+            customer_emails = [email.strip() for email in customer_emails if email.strip()]
+            print(f"Fetched customer emails for booking {entry.get('bookingNo', entry['id'])}: {customer_emails}")
 
             sales_person_emails = customer.get("salesPersonEmail", [])
             if not sales_person_emails:
                 print(f"No salesperson email found for entry {entry['id']}")
                 continue
+            sales_person_emails = [email.strip() for email in sales_person_emails if email.strip()]
 
             si_filed = entry.get("siFiled", False)
             if si_filed:
@@ -121,7 +123,7 @@ def fetch_si_cutoff_data():
             volume = entry.get("volume", "")
 
             reminder_data = {
-                "Customer Email": customer_email,
+                "Customer Emails": customer_emails,
                 "Sales Person Emails": sales_person_emails,
                 "Customer Name": customer_name,
                 "Booking No": booking_no,
@@ -134,9 +136,11 @@ def fetch_si_cutoff_data():
                 "POL": entry.get("pol", "")
             }
 
-            if customer_email not in si_cutoff_data:
-                si_cutoff_data[customer_email] = []
-            si_cutoff_data[customer_email].append(reminder_data)
+            # Group by customer emails as a tuple to handle multiple emails
+            customer_emails_key = tuple(customer_emails)
+            if customer_emails_key not in si_cutoff_data:
+                si_cutoff_data[customer_emails_key] = []
+            si_cutoff_data[customer_emails_key].append(reminder_data)
 
         return si_cutoff_data
 
@@ -157,17 +161,18 @@ def send_si_cutoff_reminder():
         now = datetime.now(pytz.timezone('Asia/Kolkata'))
         print(f"Checking SI cutoff reminders at {now}")
 
-        for customer_email, bookings in si_cutoff_data.items():
+        for customer_emails_key, bookings in si_cutoff_data.items():
+            customer_emails = list(customer_emails_key)  # Convert tuple back to list
             for booking in bookings:
                 si_cutoff = booking["SI Cutoff"]
                 time_diff = si_cutoff - now
                 hours_diff = time_diff.total_seconds() / 3600
 
                 if hours_diff < 0:
-                    print(f"Skipping booking {booking['Booking No']} for {customer_email}: SI Cutoff at {si_cutoff} has already passed (hours remaining: {hours_diff})")
+                    print(f"Skipping booking {booking['Booking No']} for {customer_emails}: SI Cutoff at {si_cutoff} has already passed (hours remaining: {hours_diff})")
                     continue
 
-                print(f"Booking {booking['Booking No']} for {customer_email}: SI Cutoff at {si_cutoff}, hours remaining: {hours_diff}")
+                print(f"Booking {booking['Booking No']} for {customer_emails}: SI Cutoff at {si_cutoff}, hours remaining: {hours_diff}")
 
                 reminder_type = None
                 if 47.5 <= hours_diff <= 48.5:
@@ -179,7 +184,7 @@ def send_si_cutoff_reminder():
                     sender_email, sender_password = get_sender_by_location(booking.get("Location", "MUMBAI"))
                     msg = MIMEMultipart('alternative')
                     msg['From'] = sender_email
-                    msg['To'] = customer_email
+                    msg['To'] = ", ".join(customer_emails)
                     msg['Cc'] = ", ".join(booking["Sales Person Emails"])
                     msg['Subject'] = f"!! Reminder for Pending SI !! Booking No: {booking['Booking No']} // Vessel: {booking['Vessel']} // Customer Name: {booking['Customer Name']}"
 
@@ -252,9 +257,9 @@ doc@dessertmarine.com
                     with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
                         server.starttls()
                         server.login(sender_email, sender_password)
-                        recipients = [customer_email] + booking["Sales Person Emails"]
+                        recipients = customer_emails + booking["Sales Person Emails"]
                         server.sendmail(sender_email, recipients, msg.as_string())
-                        print(f"SI Cutoff reminder ({reminder_type}) sent to {customer_email} (CC: {booking['Sales Person Emails']}) for booking {booking['Booking No']}")
+                        print(f"SI Cutoff reminder ({reminder_type}) sent to {customer_emails} (CC: {booking['Sales Person Emails']}) for booking {booking['Booking No']}")
 
     except Exception as e:
         print(f"Error sending SI cutoff reminders: {str(e)}")
