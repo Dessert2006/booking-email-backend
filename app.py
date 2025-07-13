@@ -81,6 +81,12 @@ def fetch_si_cutoff_data():
             entry = doc.to_dict()
             entry["id"] = doc.id
 
+            # Skip if SI is already filed
+            si_filed = entry.get("siFiled", False)
+            if si_filed:
+                print(f"SI already filed for entry {entry['id']}, skipping SI cutoff reminder.")
+                continue
+
             si_cutoff = entry.get("siCutOff", "")
             if not si_cutoff:
                 print(f"No SI cutoff found for entry {entry['id']}")
@@ -109,10 +115,6 @@ def fetch_si_cutoff_data():
                 print(f"No salesperson email found for entry {entry['id']}")
                 continue
             sales_person_emails = [email.strip() for email in sales_person_emails if email.strip()]
-
-            si_filed = entry.get("siFiled", False)
-            if si_filed:
-                print(f"SI already filed for entry {entry['id']}, but sending reminder as per template")
 
             customer_name = customer.get("name", "")
             booking_no = entry.get("bookingNo", "")
@@ -601,7 +603,7 @@ Note: This is an Auto Generated Mail.
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
             server.starttls()
             server.login(sender_email, sender_password)
-            recipients = [customer_email, "sales@dessertmarine.com"]
+            recipients = [customer_email, "chirag@dessertmarine.com"]
             server.sendmail(sender_email, recipients, msg.as_string())
             print(f"Royal Castor vessel update sent to {msg['To']} (CC: {msg['Cc']})")
 
