@@ -912,9 +912,34 @@ def generate_excel_report(salesperson_email, bookings):
         return None
 
     df = pd.DataFrame(bookings)
-    if not df.empty:
-        df = df.sort_values(by=["Customer Name", "ETD"], ascending=[True, True], key=lambda col: col.str.lower() if col.dtype == object else col)
-    date_columns = [col for col in df.columns if 'date' in col.lower() or col.upper() == 'ETD']
+    # Add SI Cutoff column if not present
+    if 'SI Cutoff' not in df.columns:
+        # Try to extract from booking dicts if available
+        si_cutoff_list = []
+        for b in bookings:
+            val = b.get('SI Cutoff') or b.get('siCutOff') or ''
+            if isinstance(val, (str, type(None))):
+                si_cutoff_list.append(val)
+            elif hasattr(val, 'strftime'):
+                si_cutoff_list.append(val.strftime('%d/%m/%Y %H:%M'))
+            else:
+                si_cutoff_list.append(str(val))
+        df['SI Cutoff'] = si_cutoff_list
+    # Sort by ETD if present, else by SI Cutoff
+    sort_cols = []
+    if 'ETD' in df.columns:
+        sort_cols.append('ETD')
+    if 'SI Cutoff' in df.columns:
+        sort_cols.append('SI Cutoff')
+    if sort_cols:
+        for col in sort_cols:
+            df[col] = pd.to_datetime(df[col], errors='coerce')
+        df = df.sort_values(by=sort_cols, ascending=True)
+        # Format back to string for Excel
+        for col in sort_cols:
+            df[col] = df[col].dt.strftime('%d-%m-%Y')
+    # Format all date columns
+    date_columns = [col for col in df.columns if 'date' in col.lower() or col.upper() == 'ETD' or col.upper() == 'SI CUTOFF']
     for col in date_columns:
         df[col] = pd.to_datetime(df[col], errors='coerce').dt.strftime('%d-%m-%Y')
     excel_filename = f"booking_report_{salesperson_email.split('@')[0]}_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
