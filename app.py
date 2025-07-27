@@ -367,6 +367,9 @@ def send_pending_si_report():
             print("No bookings with SI cutoff within the next 24 hours.")
             return
 
+        # Sort the data by ETD (earliest first)
+        pending_si_data.sort(key=lambda x: pd.to_datetime(x.get('ETD', ''), errors='coerce'))
+
         for booking in pending_si_data:
             print(f"Pending SI booking: {booking}")
 
@@ -396,6 +399,7 @@ FPOD: {booking['FPOD']}
 Equipment Type: {booking['Equipment Type']}
 Vessel: {booking['Vessel']}
 ETD: {booking['ETD']}
+SI Cutoff: {booking['SI Cutoff']}
 """
         plain_body += """
 An Excel file with the details is also attached.
@@ -417,6 +421,7 @@ Note: This is an Auto Generated Mail.
             <th>Equipment Type</th>
             <th>Vessel</th>
             <th>ETD</th>
+            <th>SI Cutoff</th>
         </tr>
 """
         for booking in pending_si_data:
@@ -428,6 +433,7 @@ Note: This is an Auto Generated Mail.
             <td>{booking['Equipment Type'] if booking['Equipment Type'] else 'N/A'}</td>
             <td>{booking['Vessel']}</td>
             <td>{booking['ETD']}</td>
+            <td>{booking['SI Cutoff']}</td>
         </tr>
 """
         html_body += """
@@ -531,6 +537,9 @@ def send_royal_castor_vessel_update():
         if not royal_castor_data:
             print("No bookings for Royal Castor with referenceNo.")
             return
+
+        # Sort the data by ETD (earliest to latest)
+        royal_castor_data.sort(key=lambda x: pd.to_datetime(x.get('ETD', ''), errors='coerce'))
 
         for booking in royal_castor_data:
             print(f"Royal Castor booking: {booking}")
