@@ -47,10 +47,10 @@ def get_sender_by_location(location):
     if location:
         loc = location.strip().upper()
         if "MUMBAI" in loc:
-            return SENDER_EMAIL_MUMBAI, SENDER_PASSWORD_MUMBAI
+            return BRANCH_EMAILS["MUMBAI"]
         if "GUJARAT" in loc:
-            return SENDER_EMAIL_GUJARAT, SENDER_PASSWORD_GUJARAT
-    return SENDER_EMAIL_MUMBAI, SENDER_PASSWORD_MUMBAI
+            return BRANCH_EMAILS["GUJARAT"]
+    return BRANCH_EMAILS["MUMBAI"]
 
 def parse_si_cutoff_date(si_cutoff):
     """Parse SI cutoff date from dd/mm-hhmm HRS format (e.g., 12/06-1400 HRS) to datetime."""
