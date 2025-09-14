@@ -41,7 +41,7 @@ SMTP_PORT = 587
 SENDER_EMAIL_MUMBAI = "info@dessertmarine.com"
 SENDER_PASSWORD_MUMBAI = "gsxb yivs dscy hkrk"      # app password (Gmail shows spaces)
 SENDER_EMAIL_GUJARAT = "mundra@dessertmarine.com"
-SENDER_PASSWORD_GUJARAT = "lxru bkiv jsvr dyik"     # app password (with spaces)
+SENDER_PASSWORD_GUJARAT = "aljw cixn pbok lxpk"     # app password (with spaces)
 
 BRANCH_EMAILS = {
     "MUMBAI": (SENDER_EMAIL_MUMBAI, SENDER_PASSWORD_MUMBAI),
