@@ -621,24 +621,14 @@ Note: This is an Auto Generated Mail.
 
 @app.route('/api/send-sob-email', methods=['POST'])
 def send_sob_email():
-    """
-    Sends SOB email using branch sender chosen by LOCATION stored in Firestore.
-    Priority to determine location:
-      1) Firestore entry by id (preferred)
-      2) Firestore entry by bookingNo (fallback)
-      3) Request body 'location' (last resort, defaults to MUMBAI)
-    Accepts customer_email / sales_person_email as list or string.
-    """
     try:
         data = request.get_json()
         print(f"Received data: {data}")
 
-        # ---------- Inputs from request (used for email content) ----------
-        booking_id = data.get('id') or data.get('entry_id')
-        booking_no = data.get('booking_no') or data.get('bookingNo') or ''
         customer_email = data.get('customer_email')
         sales_person_email = data.get('sales_person_email')
         customer_name = data.get('customer_name')
+        booking_no = data.get('booking_no')
         sob_date = data.get('sob_date')
         vessel = data.get('vessel')
         voyage = data.get('voyage')
@@ -648,82 +638,39 @@ def send_sob_email():
         container_no = data.get('container_no')
         volume = data.get('volume')
         bl_no = data.get('bl_no', '')
+        location = data.get('location', 'MUMBAI')
 
-        # ---------- Find LOCATION from Firestore ----------
-        def _extract_loc_str(loc_val):
-            # entries.location can be "GUJARAT" or { name: "GUJARAT" }
-            if isinstance(loc_val, dict):
-                return (loc_val.get('name') or '').strip()
-            return (loc_val or '').strip()
-
-        location_from_db = None
-
-        # Prefer lookup by Firestore document id
-        if booking_id:
-            try:
-                doc_ref = db.collection("entries").document(booking_id)
-                doc = doc_ref.get()
-                if doc.exists:
-                    entry = doc.to_dict()
-                    location_from_db = _extract_loc_str(entry.get('location'))
-                    print(f"[SOB] Location by id {booking_id}: {location_from_db}")
-                else:
-                    print(f"[SOB] No Firestore entry for id {booking_id}")
-            except Exception as e:
-                print(f"[SOB] Error fetching entry by id {booking_id}: {e}")
-
-        # Fallback: lookup by bookingNo if still unknown
-        if not location_from_db and booking_no:
-            try:
-                query_ref = db.collection("entries").where("bookingNo", "==", booking_no).limit(1)
-                docs = list(query_ref.stream())
-                if docs:
-                    entry = docs[0].to_dict()
-                    location_from_db = _extract_loc_str(entry.get('location'))
-                    print(f"[SOB] Location by bookingNo {booking_no}: {location_from_db}")
-                else:
-                    print(f"[SOB] No Firestore entry for bookingNo {booking_no}")
-            except Exception as e:
-                print(f"[SOB] Error querying by bookingNo {booking_no}: {e}")
-
-        # Last resort: trust request body (or default MUMBAI)
-        location = location_from_db or _extract_loc_str(data.get('location')) or "MUMBAI"
-        print(f"[SOB] Using location: {location}")
-
-        # ---------- Coerce email arrays ----------
-        def _coerce_emails(val):
-            if not val:
-                return []
-            if isinstance(val, list):
-                return [e.strip() for e in val if str(e).strip()]
-            if isinstance(val, str):
-                # support "a@x.com, b@y.com"
-                parts = [p.strip() for p in val.split(",")]
-                return [p for p in parts if p]
-            return [str(val).strip()] if str(val).strip() else []
-
-        customer_emails = _coerce_emails(customer_email)
-        sales_person_emails = _coerce_emails(sales_person_email)
-
+        # Handle customer_email as a list or single string
+        customer_emails = []
+        if isinstance(customer_email, list):
+            customer_emails = [email.strip() for email in customer_email if email.strip()]
+        elif isinstance(customer_email, str) and customer_email.strip():
+            customer_emails = [customer_email.strip()]
+        
+        # Handle sales_person_email as a list or single string
+        sales_person_emails = []
+        if isinstance(sales_person_email, list):
+            sales_person_emails = [email.strip() for email in sales_person_email if email.strip()]
+        elif isinstance(sales_person_email, str) and sales_person_email.strip():
+            sales_person_emails = [sales_person_email.strip()]
+        
         if not customer_emails or not sales_person_emails:
-            print("[SOB] Missing customer_email or sales_person_email")
+            print("Missing customer_email or sales_person_email")
             return jsonify({"error": "Customer or salesperson email missing"}), 400
 
-        # ---------- Container no formatting ----------
+        print(f"Raw container_no: {container_no} (type: {type(container_no)})")
         if container_no is None:
             container_no_str = ""
         elif isinstance(container_no, list):
-            container_no_str = ", ".join(str(c) for c in container_no if c)
+            container_no_str = ", ".join(str(c) for c in container_no if c) if container_no else ""
         elif isinstance(container_no, str):
             container_no_str = container_no
         else:
             container_no_str = str(container_no)
+        print(f"Processed container_no_str: {container_no_str}")
 
-        # ---------- Pick sender based on LOCATION from DB ----------
-        sender_email, sender_password = get_sender_by_location(location)
-
-        # ---------- Compose mail ----------
         msg = MIMEMultipart('alternative')
+        sender_email, sender_password = get_sender_by_location(location)
         msg['From'] = sender_email
         msg['To'] = ", ".join(customer_emails)
         msg['Cc'] = ", ".join(sales_person_emails)
@@ -788,22 +735,21 @@ Note: This is an Auto Generated Mail.
 """
         msg.attach(MIMEText(html_body, 'html'))
 
-        print(f"[SOB] Sending from {sender_email} (location: {location}) to {customer_emails} CC {sales_person_emails}")
+        print(f"Attempting to send email from {sender_email} to {customer_emails} with CC {sales_person_emails}")
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
             server.starttls()
-            print("[SOB] TLS started")
+            print("TLS started")
             server.login(sender_email, sender_password)
-            print("[SOB] Login successful")
+            print("Login successful")
             recipients = customer_emails + sales_person_emails
             server.sendmail(sender_email, recipients, msg.as_string())
-            print("[SOB] Email sent successfully")
+            print("Email sent successfully")
 
         return jsonify({"message": "Email sent successfully"}), 200
 
     except Exception as e:
-        print(f"[SOB] Error sending email: {str(e)}")
+        print(f"Error sending email: {str(e)}")
         return jsonify({"error": str(e)}), 500
-
 
 @app.route('/api/send-selling-email', methods=['POST'])
 def send_selling_email():
