@@ -22,7 +22,10 @@ app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": ["http://localhost:3000", "https://booking-report.vercel.app"]}})
 
 # Initialize Firestore
-credential_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", os.path.join(os.path.dirname(__file__), "firebase-admin-sdk.json"))
+credential_path = os.environ.get(
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    os.path.join(os.path.dirname(__file__), "firebase-admin-sdk.json"),
+)
 if not os.path.exists(credential_path):
     raise FileNotFoundError(f"Firebase credentials file not found at: {credential_path}")
 
@@ -33,19 +36,25 @@ db = firestore.client()
 # Email configuration
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
+
+# You can move these to env vars if you prefer; leaving as-is for drop-in compatibility
 SENDER_EMAIL_MUMBAI = "info@dessertmarine.com"
-SENDER_PASSWORD_MUMBAI = "gsxb yivs dscy hkrk"
+SENDER_PASSWORD_MUMBAI = "gsxb yivs dscy hkrk"      # app password (Gmail shows spaces)
 SENDER_EMAIL_GUJARAT = "mundra@dessertmarine.com"
-SENDER_PASSWORD_GUJARAT = "lxru bkiv jsvr dyik"
+SENDER_PASSWORD_GUJARAT = "lxru bkiv jsvr dyik"     # app password (with spaces)
 
 BRANCH_EMAILS = {
     "MUMBAI": (SENDER_EMAIL_MUMBAI, SENDER_PASSWORD_MUMBAI),
     "GUJARAT": (SENDER_EMAIL_GUJARAT, SENDER_PASSWORD_GUJARAT),
 }
 
+def normalized_app_password(pw: str) -> str:
+    """Gmail app passwords are shown with spaces; SMTP expects no spaces."""
+    return pw.replace(" ", "") if isinstance(pw, str) else pw
+
 def get_sender_by_location(location):
     if location:
-        loc = location.strip().upper()
+        loc = str(location).strip().upper()
         if "MUMBAI" in loc:
             return BRANCH_EMAILS["MUMBAI"]
         if "GUJARAT" in loc:
@@ -53,7 +62,7 @@ def get_sender_by_location(location):
     return BRANCH_EMAILS["MUMBAI"]
 
 def parse_si_cutoff_date(si_cutoff):
-    """Parse SI cutoff date from dd/mm-hhmm HRS format (e.g., 12/06-1400 HRS) to datetime."""
+    """Parse SI cutoff date from dd/mm-hhmm HRS format (e.g., 12/06-1400 HRS) to timezone-aware datetime."""
     try:
         date_part, time_part = si_cutoff.split('-')
         hour_minute = time_part.replace(" HRS", "").strip()
@@ -106,7 +115,6 @@ def fetch_si_cutoff_data():
             if not customer_emails:
                 print(f"No customer email found for entry {entry['id']}")
                 continue
-            # Use all customer emails instead of just the first one
             customer_emails = [email.strip() for email in customer_emails if email.strip()]
             print(f"Fetched customer emails for booking {entry.get('bookingNo', entry['id'])}: {customer_emails}")
 
@@ -124,6 +132,10 @@ def fetch_si_cutoff_data():
 
             volume = entry.get("volume", "")
 
+            # Location can be a string or {name: "..."}
+            raw_loc = entry.get("location", "")
+            location = raw_loc.get("name") if isinstance(raw_loc, dict) else raw_loc
+
             reminder_data = {
                 "Customer Emails": customer_emails,
                 "Sales Person Emails": sales_person_emails,
@@ -134,7 +146,7 @@ def fetch_si_cutoff_data():
                 "Voyage": entry.get("voyage", ""),
                 "FPOD": entry.get("fpod", ""),
                 "Volume": volume,
-                "Location": entry.get("location", ""),
+                "Location": location or "",
                 "POL": entry.get("pol", "")
             }
 
@@ -258,7 +270,7 @@ doc@dessertmarine.com
 
                     with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
                         server.starttls()
-                        server.login(sender_email, sender_password)
+                        server.login(sender_email, normalized_app_password(sender_password))
                         recipients = customer_emails + booking["Sales Person Emails"]
                         server.sendmail(sender_email, recipients, msg.as_string())
                         print(f"SI Cutoff reminder ({reminder_type}) sent to {customer_emails} (CC: {booking['Sales Person Emails']}) for booking {booking['Booking No']}")
@@ -452,7 +464,7 @@ Note: This is an Auto Generated Mail.
 
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
             server.starttls()
-            server.login(sender_email, sender_password)
+            server.login(sender_email, normalized_app_password(sender_password))
             recipients = ["info@dessertmarine.com", "doc@dessertmarine.com", "chirag@dessertmarine.com"]
             server.sendmail(sender_email, recipients, msg.as_string())
             print(f"Pending SI report sent to {msg['To']} (CC: {msg['Cc']})")
@@ -611,7 +623,7 @@ Note: This is an Auto Generated Mail.
 
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
             server.starttls()
-            server.login(sender_email, sender_password)
+            server.login(sender_email, normalized_app_password(sender_password))
             recipients = [customer_email, "chirag@dessertmarine.com"]
             server.sendmail(sender_email, recipients, msg.as_string())
             print(f"Royal Castor vessel update sent to {msg['To']} (CC: {msg['Cc']})")
@@ -621,14 +633,24 @@ Note: This is an Auto Generated Mail.
 
 @app.route('/api/send-sob-email', methods=['POST'])
 def send_sob_email():
+    """
+    Sends SOB email using branch sender chosen by LOCATION stored in Firestore.
+    Priority to determine location:
+      1) Firestore entry by id (preferred)
+      2) Firestore entry by bookingNo (fallback)
+      3) Request body 'location' (last resort, defaults to MUMBAI)
+    Accepts customer_email / sales_person_email as list or string.
+    """
     try:
         data = request.get_json()
         print(f"Received data: {data}")
 
+        # ---------- Inputs from request (used for email content) ----------
+        booking_id = data.get('id') or data.get('entry_id')
+        booking_no = data.get('booking_no') or data.get('bookingNo') or ''
         customer_email = data.get('customer_email')
         sales_person_email = data.get('sales_person_email')
         customer_name = data.get('customer_name')
-        booking_no = data.get('booking_no')
         sob_date = data.get('sob_date')
         vessel = data.get('vessel')
         voyage = data.get('voyage')
@@ -638,39 +660,80 @@ def send_sob_email():
         container_no = data.get('container_no')
         volume = data.get('volume')
         bl_no = data.get('bl_no', '')
-        location = data.get('location', 'MUMBAI')
 
-        # Handle customer_email as a list or single string
-        customer_emails = []
-        if isinstance(customer_email, list):
-            customer_emails = [email.strip() for email in customer_email if email.strip()]
-        elif isinstance(customer_email, str) and customer_email.strip():
-            customer_emails = [customer_email.strip()]
-        
-        # Handle sales_person_email as a list or single string
-        sales_person_emails = []
-        if isinstance(sales_person_email, list):
-            sales_person_emails = [email.strip() for email in sales_person_email if email.strip()]
-        elif isinstance(sales_person_email, str) and sales_person_email.strip():
-            sales_person_emails = [sales_person_email.strip()]
-        
+        # ---------- Find LOCATION from Firestore ----------
+        def _extract_loc_str(loc_val):
+            if isinstance(loc_val, dict):
+                return (loc_val.get('name') or '').strip()
+            return (loc_val or '').strip()
+
+        location_from_db = None
+
+        # Prefer lookup by Firestore document id
+        if booking_id:
+            try:
+                doc_ref = db.collection("entries").document(booking_id)
+                doc = doc_ref.get()
+                if doc.exists:
+                    entry = doc.to_dict()
+                    location_from_db = _extract_loc_str(entry.get('location'))
+                    print(f"[SOB] Location by id {booking_id}: {location_from_db}")
+                else:
+                    print(f"[SOB] No Firestore entry for id {booking_id}")
+            except Exception as e:
+                print(f"[SOB] Error fetching entry by id {booking_id}: {e}")
+
+        # Fallback: lookup by bookingNo if still unknown
+        if not location_from_db and booking_no:
+            try:
+                query_ref = db.collection("entries").where("bookingNo", "==", booking_no).limit(1)
+                docs = list(query_ref.stream())
+                if docs:
+                    entry = docs[0].to_dict()
+                    location_from_db = _extract_loc_str(entry.get('location'))
+                    print(f"[SOB] Location by bookingNo {booking_no}: {location_from_db}")
+                else:
+                    print(f"[SOB] No Firestore entry for bookingNo {booking_no}")
+            except Exception as e:
+                print(f"[SOB] Error querying by bookingNo {booking_no}: {e}")
+
+        # Last resort: trust request body (or default MUMBAI)
+        location = location_from_db or _extract_loc_str(data.get('location')) or "MUMBAI"
+        print(f"[SOB] Using location: {location}")
+
+        # ---------- Coerce email arrays ----------
+        def _coerce_emails(val):
+            if not val:
+                return []
+            if isinstance(val, list):
+                return [e.strip() for e in val if str(e).strip()]
+            if isinstance(val, str):
+                parts = [p.strip() for p in val.split(",")]
+                return [p for p in parts if p]
+            return [str(val).strip()] if str(val).strip() else []
+
+        customer_emails = _coerce_emails(customer_email)
+        sales_person_emails = _coerce_emails(sales_person_email)
+
         if not customer_emails or not sales_person_emails:
-            print("Missing customer_email or sales_person_email")
+            print("[SOB] Missing customer_email or sales_person_email")
             return jsonify({"error": "Customer or salesperson email missing"}), 400
 
-        print(f"Raw container_no: {container_no} (type: {type(container_no)})")
+        # ---------- Container no formatting ----------
         if container_no is None:
             container_no_str = ""
         elif isinstance(container_no, list):
-            container_no_str = ", ".join(str(c) for c in container_no if c) if container_no else ""
+            container_no_str = ", ".join(str(c) for c in container_no if c)
         elif isinstance(container_no, str):
             container_no_str = container_no
         else:
             container_no_str = str(container_no)
-        print(f"Processed container_no_str: {container_no_str}")
 
-        msg = MIMEMultipart('alternative')
+        # ---------- Pick sender based on LOCATION from DB ----------
         sender_email, sender_password = get_sender_by_location(location)
+
+        # ---------- Compose mail ----------
+        msg = MIMEMultipart('alternative')
         msg['From'] = sender_email
         msg['To'] = ", ".join(customer_emails)
         msg['Cc'] = ", ".join(sales_person_emails)
@@ -735,20 +798,20 @@ Note: This is an Auto Generated Mail.
 """
         msg.attach(MIMEText(html_body, 'html'))
 
-        print(f"Attempting to send email from {sender_email} to {customer_emails} with CC {sales_person_emails}")
+        print(f"[SOB] Sending from {sender_email} (location: {location}) to {customer_emails} CC {sales_person_emails}")
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
             server.starttls()
-            print("TLS started")
-            server.login(sender_email, sender_password)
-            print("Login successful")
+            print("[SOB] TLS started")
+            server.login(sender_email, normalized_app_password(sender_password))
+            print("[SOB] Login successful")
             recipients = customer_emails + sales_person_emails
             server.sendmail(sender_email, recipients, msg.as_string())
-            print("Email sent successfully")
+            print("[SOB] Email sent successfully")
 
         return jsonify({"message": "Email sent successfully"}), 200
 
     except Exception as e:
-        print(f"Error sending email: {str(e)}")
+        print(f"[SOB] Error sending email: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/send-selling-email', methods=['POST'])
@@ -836,7 +899,7 @@ Note: This is an Auto Generated Mail.
         print(f"Attempting to send selling email from {sender_email} to {msg['To']} with CC {sales_person_email}")
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
             server.starttls()
-            server.login(sender_email, sender_password)
+            server.login(sender_email, normalized_app_password(sender_password))
             recipients = ["manas.jadhav.7779@gmail.com", "tech.manasjadhav@gmail.com", sales_person_email]
             server.sendmail(sender_email, recipients, msg.as_string())
             print("Selling email sent successfully")
@@ -923,7 +986,6 @@ def generate_excel_report(salesperson_email, bookings):
     df = pd.DataFrame(bookings)
     # Add SI Cutoff column if not present
     if 'SI Cutoff' not in df.columns:
-        # Try to extract from booking dicts if available
         si_cutoff_list = []
         for b in bookings:
             val = b.get('SI Cutoff') or b.get('siCutOff') or ''
@@ -1002,7 +1064,7 @@ Note: This is an Auto Generated Mail.
                 msg.attach(attachment)
             with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
                 server.starttls()
-                server.login(sender_email, sender_password)
+                server.login(sender_email, normalized_app_password(sender_password))
                 server.sendmail(sender_email, all_sales_emails, msg.as_string())
                 print(f"Daily report sent to {salesperson_email} (all locations)")
             os.remove(excel_file)
