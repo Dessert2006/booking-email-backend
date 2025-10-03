@@ -19,7 +19,7 @@ load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": ["http://localhost:3000", "https://booking-report.vercel.app"]}},supports_credentials=True,allow_headers="*",methods=["GET", "POST", "OPTIONS"])
+CORS(app, resources={r"/api/*": {"origins": ["http://localhost:3000", "https://booking-report.vercel.app"]}})
 
 # Initialize Firestore
 credential_path = os.environ.get(
