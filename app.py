@@ -13,6 +13,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import pytz
 from firebase_admin import credentials, firestore, initialize_app
+import resend
 
 # Load environment variables
 load_dotenv()
@@ -51,6 +52,30 @@ BRANCH_EMAILS = {
 def normalized_app_password(pw: str) -> str:
     """Gmail app passwords are shown with spaces; SMTP expects no spaces."""
     return pw.replace(" ", "") if isinstance(pw, str) else pw
+
+def send_via_resend(sender_email, recipients, subject, html_body, text_body=None):
+    """
+    Sends email via Resend HTTPS API (works on Render free).
+    """
+    try:
+        resend.api_key = "re_HECZPcT4_EK43sFa5RjHw6vhVWEdY3wrk"
+        if not resend.api_key:
+            raise ValueError("RESEND_API_KEY not set")
+
+        params = {
+            "from": sender_email,
+            "to": recipients,
+            "subject": subject,
+            "html": html_body,
+        }
+        if text_body:
+            params["text"] = text_body
+
+        resend.Emails.send(params)
+        print(f"✅ Sent via Resend: {subject} → {recipients}")
+    except Exception as e:
+        print(f"❌ Resend error: {e}")
+
 
 def get_sender_by_location(location):
     if location:
@@ -631,21 +656,22 @@ Note: This is an Auto Generated Mail.
     except Exception as e:
         print(f"Error sending Royal Castor vessel update: {str(e)}")
 
+from flask import request, jsonify
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+import os, resend
+
 @app.route('/api/send-sob-email', methods=['POST'])
 def send_sob_email():
     """
     Sends SOB email using branch sender chosen by LOCATION stored in Firestore.
-    Priority to determine location:
-      1) Firestore entry by id (preferred)
-      2) Firestore entry by bookingNo (fallback)
-      3) Request body 'location' (last resort, defaults to MUMBAI)
-    Accepts customer_email / sales_person_email as list or string.
+    Uses Resend HTTPS API (Render-compatible) instead of SMTP.
     """
     try:
         data = request.get_json()
         print(f"Received data: {data}")
 
-        # ---------- Inputs from request (used for email content) ----------
+        # ---------- Extract inputs ----------
         booking_id = data.get('id') or data.get('entry_id')
         booking_no = data.get('booking_no') or data.get('bookingNo') or ''
         customer_email = data.get('customer_email')
@@ -708,8 +734,7 @@ def send_sob_email():
             if isinstance(val, list):
                 return [e.strip() for e in val if str(e).strip()]
             if isinstance(val, str):
-                parts = [p.strip() for p in val.split(",")]
-                return [p for p in parts if p]
+                return [p.strip() for p in val.split(",") if p.strip()]
             return [str(val).strip()] if str(val).strip() else []
 
         customer_emails = _coerce_emails(customer_email)
@@ -724,13 +749,11 @@ def send_sob_email():
             container_no_str = ""
         elif isinstance(container_no, list):
             container_no_str = ", ".join(str(c) for c in container_no if c)
-        elif isinstance(container_no, str):
-            container_no_str = container_no
         else:
             container_no_str = str(container_no)
 
-        # ---------- Pick sender based on LOCATION from DB ----------
-        sender_email, sender_password = get_sender_by_location(location)
+        # ---------- Pick sender based on LOCATION ----------
+        sender_email, _ = get_sender_by_location(location)
 
         # ---------- Compose mail ----------
         msg = MIMEMultipart('alternative')
@@ -759,8 +782,6 @@ For any queries please write to cs team.
 
 Note: This is an Auto Generated Mail.
 """
-        msg.attach(MIMEText(plain_body, 'plain'))
-
         html_body = f"""
 <html>
 <body style="font-family: Arial, sans-serif;">
@@ -796,23 +817,34 @@ Note: This is an Auto Generated Mail.
 </body>
 </html>
 """
-        msg.attach(MIMEText(html_body, 'html'))
 
-        print(f"[SOB] Sending from {sender_email} (location: {location}) to {customer_emails} CC {sales_person_emails}")
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            print("[SOB] TLS started")
-            server.login(sender_email, normalized_app_password(sender_password))
-            print("[SOB] Login successful")
+        # ---------- Send via Resend (HTTPS API) ----------
+        try:
+            resend.api_key = os.getenv("RESEND_API_KEY")
+            if not resend.api_key:
+                raise ValueError("RESEND_API_KEY not set")
+
             recipients = customer_emails + sales_person_emails
-            server.sendmail(sender_email, recipients, msg.as_string())
-            print("[SOB] Email sent successfully")
+            params = {
+                "from": sender_email,
+                "to": recipients,
+                "subject": msg["Subject"],
+                "html": html_body,
+                "text": plain_body
+            }
+            resend.Emails.send(params)
+            print(f"[SOB] ✅ Email sent via Resend to {recipients}")
 
-        return jsonify({"message": "Email sent successfully"}), 200
+            return jsonify({"message": "Email sent successfully via Resend"}), 200
+
+        except Exception as e:
+            print(f"[SOB] ❌ Resend sending error: {e}")
+            return jsonify({"error": f"Resend sending error: {e}"}), 500
 
     except Exception as e:
-        print(f"[SOB] Error sending email: {str(e)}")
+        print(f"[SOB] General error: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
 
 @app.route('/api/send-selling-email', methods=['POST'])
 def send_selling_email():
