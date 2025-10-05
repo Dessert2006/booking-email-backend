@@ -91,3 +91,4 @@ xlrd==1.2.0
 gunicorn
 schedule
 firebase-admin
+resend==2.4.0
