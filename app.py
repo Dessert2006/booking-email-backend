@@ -664,30 +664,30 @@ import os, resend
 @app.route('/api/send-sob-email', methods=['POST'])
 def send_sob_email():
     """
-    Sends SOB email using branch sender chosen by LOCATION stored in Firestore.
-    Uses Resend HTTPS API (Render-compatible) instead of SMTP.
+    Sends SOB email using the branch sender chosen by LOCATION (from Firestore),
+    via Gmail SMTP using App Passwords (no Resend).
     """
     try:
-        data = request.get_json()
+        data = request.get_json(force=True)
         print(f"Received data: {data}")
 
-        # ---------- Extract inputs ----------
+        # --------- Extract inputs ----------
         booking_id = data.get('id') or data.get('entry_id')
         booking_no = data.get('booking_no') or data.get('bookingNo') or ''
         customer_email = data.get('customer_email')
         sales_person_email = data.get('sales_person_email')
-        customer_name = data.get('customer_name')
-        sob_date = data.get('sob_date')
-        vessel = data.get('vessel')
-        voyage = data.get('voyage')
-        pol = data.get('pol')
-        pod = data.get('pod')
-        fpod = data.get('fpod', '')
+        customer_name = data.get('customer_name') or ''
+        sob_date = data.get('sob_date') or ''
+        vessel = data.get('vessel') or ''
+        voyage = data.get('voyage') or ''
+        pol = data.get('pol') or ''
+        pod = data.get('pod') or ''
+        fpod = data.get('fpod', '') or ''
         container_no = data.get('container_no')
-        volume = data.get('volume')
-        bl_no = data.get('bl_no', '')
+        volume = data.get('volume') or ''
+        bl_no = data.get('bl_no', '') or ''
 
-        # ---------- Find LOCATION from Firestore ----------
+        # --------- Find LOCATION from Firestore ----------
         def _extract_loc_str(loc_val):
             if isinstance(loc_val, dict):
                 return (loc_val.get('name') or '').strip()
@@ -695,44 +695,37 @@ def send_sob_email():
 
         location_from_db = None
 
-        # Prefer lookup by Firestore document id
         if booking_id:
             try:
-                doc_ref = db.collection("entries").document(booking_id)
-                doc = doc_ref.get()
+                doc = db.collection("entries").document(booking_id).get()
                 if doc.exists:
                     entry = doc.to_dict()
                     location_from_db = _extract_loc_str(entry.get('location'))
                     print(f"[SOB] Location by id {booking_id}: {location_from_db}")
-                else:
-                    print(f"[SOB] No Firestore entry for id {booking_id}")
             except Exception as e:
                 print(f"[SOB] Error fetching entry by id {booking_id}: {e}")
 
-        # Fallback: lookup by bookingNo if still unknown
         if not location_from_db and booking_no:
             try:
-                query_ref = db.collection("entries").where("bookingNo", "==", booking_no).limit(1)
-                docs = list(query_ref.stream())
+                docs = list(db.collection("entries")
+                            .where("bookingNo", "==", booking_no)
+                            .limit(1).stream())
                 if docs:
                     entry = docs[0].to_dict()
                     location_from_db = _extract_loc_str(entry.get('location'))
                     print(f"[SOB] Location by bookingNo {booking_no}: {location_from_db}")
-                else:
-                    print(f"[SOB] No Firestore entry for bookingNo {booking_no}")
             except Exception as e:
                 print(f"[SOB] Error querying by bookingNo {booking_no}: {e}")
 
-        # Last resort: trust request body (or default MUMBAI)
         location = location_from_db or _extract_loc_str(data.get('location')) or "MUMBAI"
         print(f"[SOB] Using location: {location}")
 
-        # ---------- Coerce email arrays ----------
+        # --------- Coerce email arrays ----------
         def _coerce_emails(val):
             if not val:
                 return []
             if isinstance(val, list):
-                return [e.strip() for e in val if str(e).strip()]
+                return [str(e).strip() for e in val if str(e).strip()]
             if isinstance(val, str):
                 return [p.strip() for p in val.split(",") if p.strip()]
             return [str(val).strip()] if str(val).strip() else []
@@ -741,10 +734,9 @@ def send_sob_email():
         sales_person_emails = _coerce_emails(sales_person_email)
 
         if not customer_emails or not sales_person_emails:
-            print("[SOB] Missing customer_email or sales_person_email")
             return jsonify({"error": "Customer or salesperson email missing"}), 400
 
-        # ---------- Container no formatting ----------
+        # --------- Container formatting ----------
         if container_no is None:
             container_no_str = ""
         elif isinstance(container_no, list):
@@ -752,15 +744,13 @@ def send_sob_email():
         else:
             container_no_str = str(container_no)
 
-        # ---------- Pick sender based on LOCATION ----------
-        sender_email, _ = get_sender_by_location(location)
+        # --------- Pick sender (and app password) by LOCATION ----------
+        sender_email, sender_password = get_sender_by_location(location)
+        if not sender_password:
+            return jsonify({"error": f"No app password configured for {sender_email}"}), 500
 
-        # ---------- Compose mail ----------
-        msg = MIMEMultipart('alternative')
-        msg['From'] = sender_email
-        msg['To'] = ", ".join(customer_emails)
-        msg['Cc'] = ", ".join(sales_person_emails)
-        msg['Subject'] = f"{customer_name} | SHIPPED ON BOARD | {vessel} | {booking_no} | {bl_no}"
+        # --------- Build message ----------
+        subject = f"{customer_name} | SHIPPED ON BOARD | {vessel} | {booking_no} | {bl_no}"
 
         plain_body = f"""
 Dear Sir/Madam,
@@ -781,69 +771,61 @@ SOB DATE: {sob_date}
 For any queries please write to cs team.
 
 Note: This is an Auto Generated Mail.
-"""
+""".strip()
+
         html_body = f"""
 <html>
 <body style="font-family: Arial, sans-serif;">
-    <p>Dear Sir/Madam,</p>
-    <p>We are pleased to confirm your Subject Shipment is Shipped On Board.</p>
-    <p>Details as Below:</p>
-    <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse;">
-        <tr style="background-color: #f2f2f2;">
-            <th>BOOKING NO</th>
-            <th>POL</th>
-            <th>POD</th>
-            <th>FPOD</th>
-            <th>VOLUME</th>
-            <th>CONTAINER NO</th>
-            <th>VESSEL</th>
-            <th>VOYAGE</th>
-            <th>SOB DATE</th>
-        </tr>
-        <tr>
-            <td>{booking_no}</td>
-            <td>{pol}</td>
-            <td>{pod}</td>
-            <td>{fpod}</td>
-            <td>{volume}</td>
-            <td>{container_no_str if container_no_str else 'N/A'}</td>
-            <td>{vessel}</td>
-            <td>{voyage}</td>
-            <td>{sob_date}</td>
-        </tr>
-    </table>
-    <p>For any queries please write to cs team.</p>
-    <p><em>Note: This is an Auto Generated Mail.</em></p>
+  <p>Dear Sir/Madam,</p>
+  <p>We are pleased to confirm your Subject Shipment is Shipped On Board.</p>
+  <p>Details as Below:</p>
+  <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse;">
+    <tr style="background-color: #f2f2f2;">
+      <th>BOOKING NO</th><th>POL</th><th>POD</th><th>FPOD</th>
+      <th>VOLUME</th><th>CONTAINER NO</th><th>VESSEL</th><th>VOYAGE</th><th>SOB DATE</th>
+    </tr>
+    <tr>
+      <td>{booking_no}</td><td>{pol}</td><td>{pod}</td><td>{fpod}</td>
+      <td>{volume}</td><td>{container_no_str or 'N/A'}</td><td>{vessel}</td><td>{voyage}</td><td>{sob_date}</td>
+    </tr>
+  </table>
+  <p>For any queries please write to cs team.</p>
+  <p><em>Note: This is an Auto Generated Mail.</em></p>
 </body>
 </html>
-"""
+""".strip()
 
-        # ---------- Send via Resend (HTTPS API) ----------
-        try:
-            resend.api_key = os.getenv("RESEND_API_KEY")
-            if not resend.api_key:
-                raise ValueError("RESEND_API_KEY not set")
+        msg = MIMEMultipart('alternative')
+        msg['From'] = sender_email
+        msg['To'] = ", ".join(customer_emails)
+        msg['Cc'] = ", ".join(sales_person_emails)
+        msg['Subject'] = subject
+        msg.attach(MIMEText(plain_body, 'plain'))
+        msg.attach(MIMEText(html_body, 'html'))
 
-            recipients = customer_emails + sales_person_emails
-            params = {
-                "from": sender_email,
-                "to": recipients,
-                "subject": msg["Subject"],
-                "html": html_body,
-                "text": plain_body
-            }
-            resend.Emails.send(params)
-            print(f"[SOB] ✅ Email sent via Resend to {recipients}")
+        recipients = customer_emails + sales_person_emails
 
-            return jsonify({"message": "Email sent successfully via Resend"}), 200
+        # --------- Send via Gmail SMTP (STARTTLS, App Password) ----------
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=20) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(sender_email, normalized_app_password(sender_password))
+            server.sendmail(sender_email, recipients, msg.as_string())
 
-        except Exception as e:
-            print(f"[SOB] ❌ Resend sending error: {e}")
-            return jsonify({"error": f"Resend sending error: {e}"}), 500
+        print(f"[SOB] ✅ Email sent via Gmail SMTP from {sender_email} to {recipients}")
+        return jsonify({"message": "Email sent successfully"}), 200
 
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"[SOB] Auth error: {e}")
+        return jsonify({"error": "SMTP authentication failed (check app password)"}), 500
+    except smtplib.SMTPConnectError as e:
+        print(f"[SOB] Connect error: {e}")
+        return jsonify({"error": "SMTP connection failed"}), 500
     except Exception as e:
-        print(f"[SOB] General error: {str(e)}")
+        print(f"[SOB] General error: {e}")
         return jsonify({"error": str(e)}), 500
+
 
 
 @app.route('/api/send-selling-email', methods=['POST'])
