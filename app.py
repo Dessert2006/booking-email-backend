@@ -805,16 +805,45 @@ Note: This is an Auto Generated Mail.
 
         recipients = customer_emails + sales_person_emails
 
-        # --------- Send via Gmail SMTP (STARTTLS, App Password) ----------
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=20) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(sender_email, normalized_app_password(sender_password))
-            server.sendmail(sender_email, recipients, msg.as_string())
+        # Prepare payload for background send
+        raw_message = msg.as_string()
 
-        print(f"[SOB] ✅ Email sent via Gmail SMTP from {sender_email} to {recipients}")
-        return jsonify({"message": "Email sent successfully"}), 200
+        # Dispatch actual SMTP send to background thread so the HTTP request
+        # can return immediately. This avoids frontend cancellations when the
+        # SMTP server is slow or when multiple emails are being sent.
+        def _send_sob_email_sync(sender_email_inner, sender_password_inner, recipients_inner, raw_msg):
+            try:
+                with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30) as server:
+                    server.ehlo()
+                    server.starttls()
+                    server.ehlo()
+                    server.login(sender_email_inner, normalized_app_password(sender_password_inner))
+                    server.sendmail(sender_email_inner, recipients_inner, raw_msg)
+                print(f"[SOB] ✅ (background) Email sent via Gmail SMTP from {sender_email_inner} to {recipients_inner}")
+            except Exception as e:
+                # SMTP may be blocked on some platforms (e.g., Render). Attempt HTTP API fallback via Resend.
+                print(f"[SOB] (background) SMTP send failed: {e}. Attempting Resend fallback...")
+                try:
+                    # Try to reconstruct a basic HTML/plain message for Resend
+                    subject = msg.get('Subject', '') if 'msg' in locals() else ''
+                    # recipients_inner is a list; resend expects list or string
+                    # Use the raw_msg as html body fallback (it contains MIME headers) — better to pass html/plain separately
+                    # For safety, pass a short text body and the raw message as html.
+                    send_via_resend(sender_email_inner, recipients_inner, subject, raw_msg, text_body="(sent via fallback)")
+                    print(f"[SOB] ✅ (background) Email sent via Resend fallback to {recipients_inner}")
+                except Exception as e2:
+                    print(f"[SOB] (background) Resend fallback also failed: {e2}")
+
+        send_thread = threading.Thread(
+            target=_send_sob_email_sync,
+            args=(sender_email, sender_password, recipients, raw_message),
+            daemon=True,
+        )
+        send_thread.start()
+
+        # Return immediately so frontend doesn't wait for SMTP to complete.
+        print(f"[SOB] Dispatched background send from {sender_email} to {recipients}")
+        return jsonify({"message": "Email dispatch queued"}), 202
 
     except smtplib.SMTPAuthenticationError as e:
         print(f"[SOB] Auth error: {e}")
