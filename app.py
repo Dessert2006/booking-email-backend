@@ -808,6 +808,22 @@ Note: This is an Auto Generated Mail.
         # Prepare payload for background send
         raw_message = msg.as_string()
 
+        # Persist a simple email job record in Firestore so we can track status on Render
+        try:
+            job_ref = db.collection('email_jobs').document()
+            job_id = job_ref.id
+            job_ref.set({
+                'status': 'queued',
+                'sender': sender_email,
+                'recipients': recipients,
+                'subject': subject,
+                'created_at': datetime.now().isoformat(),
+            })
+            print(f"[SOB] Created email job {job_id} in Firestore (queued)")
+        except Exception as e:
+            job_id = None
+            print(f"[SOB] Warning: could not create email job in Firestore: {e}")
+
         # Dispatch actual SMTP send to background thread so the HTTP request
         # can return immediately. This avoids frontend cancellations when the
         # SMTP server is slow or when multiple emails are being sent.
@@ -820,19 +836,41 @@ Note: This is an Auto Generated Mail.
                     server.login(sender_email_inner, normalized_app_password(sender_password_inner))
                     server.sendmail(sender_email_inner, recipients_inner, raw_msg)
                 print(f"[SOB] ✅ (background) Email sent via Gmail SMTP from {sender_email_inner} to {recipients_inner}")
+                try:
+                    if job_id:
+                        db.collection('email_jobs').document(job_id).update({
+                            'status': 'sent',
+                            'sent_at': datetime.now().isoformat(),
+                        })
+                except Exception as e:
+                    print(f"[SOB] Warning: failed to update job {job_id} to sent: {e}")
             except Exception as e:
                 # SMTP may be blocked on some platforms (e.g., Render). Attempt HTTP API fallback via Resend.
                 print(f"[SOB] (background) SMTP send failed: {e}. Attempting Resend fallback...")
                 try:
                     # Try to reconstruct a basic HTML/plain message for Resend
-                    subject = msg.get('Subject', '') if 'msg' in locals() else ''
-                    # recipients_inner is a list; resend expects list or string
-                    # Use the raw_msg as html body fallback (it contains MIME headers) — better to pass html/plain separately
-                    # For safety, pass a short text body and the raw message as html.
-                    send_via_resend(sender_email_inner, recipients_inner, subject, raw_msg, text_body="(sent via fallback)")
+                    subject_local = subject
+                    send_via_resend(sender_email_inner, recipients_inner, subject_local, raw_msg, text_body="(sent via fallback)")
                     print(f"[SOB] ✅ (background) Email sent via Resend fallback to {recipients_inner}")
+                    try:
+                        if job_id:
+                            db.collection('email_jobs').document(job_id).update({
+                                'status': 'sent_via_resend',
+                                'sent_at': datetime.now().isoformat(),
+                            })
+                    except Exception as e3:
+                        print(f"[SOB] Warning: failed to update job {job_id} after Resend send: {e3}")
                 except Exception as e2:
                     print(f"[SOB] (background) Resend fallback also failed: {e2}")
+                    try:
+                        if job_id:
+                            db.collection('email_jobs').document(job_id).update({
+                                'status': 'failed',
+                                'error': str(e2),
+                                'failed_at': datetime.now().isoformat(),
+                            })
+                    except Exception as e4:
+                        print(f"[SOB] Warning: failed to update job {job_id} to failed: {e4}")
 
         send_thread = threading.Thread(
             target=_send_sob_email_sync,
