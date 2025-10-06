@@ -57,39 +57,27 @@ def send_via_resend(sender_email, recipients, subject, html_body, text_body=None
     """
     Sends email via Resend HTTPS API (works on Render free).
     """
-    resend_key = os.environ.get('RESEND_API_KEY')
-    if not resend_key:
-        raise ValueError('RESEND_API_KEY not set in environment')
-    resend.api_key = resend_key
+    try:
+        resend_key = os.environ.get('RESEND_API_KEY')
+        if not resend_key:
+            raise ValueError('RESEND_API_KEY not set in environment')
+        resend.api_key = resend_key
 
-    def _call_resend(from_addr):
         params = {
-            "from": from_addr,
+            "from": sender_email,
             "to": recipients,
             "subject": subject,
             "html": html_body,
         }
         if text_body:
             params["text"] = text_body
-        return resend.Emails.send(params)
 
-    try:
-        resp = _call_resend(sender_email)
-        print(f"✅ Sent via Resend: {subject} → {recipients} ; resp={resp} ; from={sender_email}")
-        return {"response": resp, "used_from": sender_email}
+        # Resend's Python client may return a dict-like response; preserve/return it
+        resp = resend.Emails.send(params)
+        print(f"✅ Sent via Resend: {subject} → {recipients} ; resp={resp}")
+        return resp
     except Exception as e:
-        err_str = str(e)
-        print(f"❌ Resend error (first try): {err_str}")
-        # If domain is not verified, optionally retry with a verified sender from env
-        resend_fallback = os.environ.get('RESEND_FROM')
-        if resend_fallback and 'domain is not verified' in err_str.lower():
-            try:
-                resp2 = _call_resend(resend_fallback)
-                print(f"✅ Sent via Resend (fallback from={resend_fallback}): {subject} → {recipients} ; resp={resp2}")
-                return {"response": resp2, "used_from": resend_fallback}
-            except Exception as e2:
-                print(f"❌ Resend fallback error: {e2}")
-                raise
+        print(f"❌ Resend error: {e}")
         raise
 
 
