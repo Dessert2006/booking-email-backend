@@ -58,9 +58,10 @@ def send_via_resend(sender_email, recipients, subject, html_body, text_body=None
     Sends email via Resend HTTPS API (works on Render free).
     """
     try:
-        resend.api_key = "re_HECZPcT4_EK43sFa5RjHw6vhVWEdY3wrk"
-        if not resend.api_key:
-            raise ValueError("RESEND_API_KEY not set")
+        resend_key = os.environ.get('RESEND_API_KEY')
+        if not resend_key:
+            raise ValueError('RESEND_API_KEY not set in environment')
+        resend.api_key = resend_key
 
         params = {
             "from": sender_email,
@@ -71,10 +72,13 @@ def send_via_resend(sender_email, recipients, subject, html_body, text_body=None
         if text_body:
             params["text"] = text_body
 
-        resend.Emails.send(params)
-        print(f"✅ Sent via Resend: {subject} → {recipients}")
+        # Resend's Python client may return a dict-like response; preserve/return it
+        resp = resend.Emails.send(params)
+        print(f"✅ Sent via Resend: {subject} → {recipients} ; resp={resp}")
+        return resp
     except Exception as e:
         print(f"❌ Resend error: {e}")
+        raise
 
 
 def get_sender_by_location(location):
@@ -850,13 +854,14 @@ Note: This is an Auto Generated Mail.
                 try:
                     # Try to reconstruct a basic HTML/plain message for Resend
                     subject_local = subject
-                    send_via_resend(sender_email_inner, recipients_inner, subject_local, raw_msg, text_body="(sent via fallback)")
+                    resp = send_via_resend(sender_email_inner, recipients_inner, subject_local, raw_msg, text_body="(sent via fallback)")
                     print(f"[SOB] ✅ (background) Email sent via Resend fallback to {recipients_inner}")
                     try:
                         if job_id:
                             db.collection('email_jobs').document(job_id).update({
                                 'status': 'sent_via_resend',
                                 'sent_at': datetime.now().isoformat(),
+                                'resend_response': str(resp),
                             })
                     except Exception as e3:
                         print(f"[SOB] Warning: failed to update job {job_id} after Resend send: {e3}")
@@ -892,6 +897,20 @@ Note: This is an Auto Generated Mail.
     except Exception as e:
         print(f"[SOB] General error: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/email-job/<job_id>', methods=['GET'])
+def get_email_job(job_id):
+    try:
+        doc = db.collection('email_jobs').document(job_id).get()
+        if not doc.exists:
+            return jsonify({'error': 'job not found'}), 404
+        data = doc.to_dict()
+        data['id'] = doc.id
+        return jsonify(data), 200
+    except Exception as e:
+        print(f"Error fetching email job {job_id}: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 
