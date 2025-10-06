@@ -13,7 +13,6 @@ import pandas as pd
 from datetime import datetime, timedelta
 import pytz
 from firebase_admin import credentials, firestore, initialize_app
-import resend
 
 # Load environment variables
 load_dotenv()
@@ -52,46 +51,6 @@ BRANCH_EMAILS = {
 def normalized_app_password(pw: str) -> str:
     """Gmail app passwords are shown with spaces; SMTP expects no spaces."""
     return pw.replace(" ", "") if isinstance(pw, str) else pw
-
-def send_via_resend(sender_email, recipients, subject, html_body, text_body=None):
-    """
-    Sends email via Resend HTTPS API (works on Render free).
-    """
-    resend_key = os.environ.get('RESEND_API_KEY')
-    if not resend_key:
-        raise ValueError('RESEND_API_KEY not set in environment')
-    resend.api_key = resend_key
-
-    def _call_resend(from_addr):
-        params = {
-            "from": from_addr,
-            "to": recipients,
-            "subject": subject,
-            "html": html_body,
-        }
-        if text_body:
-            params["text"] = text_body
-        return resend.Emails.send(params)
-
-    try:
-        resp = _call_resend(sender_email)
-        print(f"✅ Sent via Resend: {subject} → {recipients} ; resp={resp} ; from={sender_email}")
-        return {"response": resp, "used_from": sender_email}
-    except Exception as e:
-        err_str = str(e)
-        print(f"❌ Resend error (first try): {err_str}")
-        # If domain is not verified, optionally retry with a verified sender from env
-        resend_fallback = os.environ.get('RESEND_FROM')
-        if resend_fallback and 'domain is not verified' in err_str.lower():
-            try:
-                resp2 = _call_resend(resend_fallback)
-                print(f"✅ Sent via Resend (fallback from={resend_fallback}): {subject} → {recipients} ; resp={resp2}")
-                return {"response": resp2, "used_from": resend_fallback}
-            except Exception as e2:
-                print(f"❌ Resend fallback error: {e2}")
-                raise
-        raise
-
 
 def get_sender_by_location(location):
     if location:
@@ -672,38 +631,37 @@ Note: This is an Auto Generated Mail.
     except Exception as e:
         print(f"Error sending Royal Castor vessel update: {str(e)}")
 
-from flask import request, jsonify
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-import os, resend
-
 @app.route('/api/send-sob-email', methods=['POST'])
 def send_sob_email():
     """
-    Sends SOB email using the branch sender chosen by LOCATION (from Firestore),
-    via Gmail SMTP using App Passwords (no Resend).
+    Sends SOB email using branch sender chosen by LOCATION stored in Firestore.
+    Priority to determine location:
+      1) Firestore entry by id (preferred)
+      2) Firestore entry by bookingNo (fallback)
+      3) Request body 'location' (last resort, defaults to MUMBAI)
+    Accepts customer_email / sales_person_email as list or string.
     """
     try:
-        data = request.get_json(force=True)
+        data = request.get_json()
         print(f"Received data: {data}")
 
-        # --------- Extract inputs ----------
+        # ---------- Inputs from request (used for email content) ----------
         booking_id = data.get('id') or data.get('entry_id')
         booking_no = data.get('booking_no') or data.get('bookingNo') or ''
         customer_email = data.get('customer_email')
         sales_person_email = data.get('sales_person_email')
-        customer_name = data.get('customer_name') or ''
-        sob_date = data.get('sob_date') or ''
-        vessel = data.get('vessel') or ''
-        voyage = data.get('voyage') or ''
-        pol = data.get('pol') or ''
-        pod = data.get('pod') or ''
-        fpod = data.get('fpod', '') or ''
+        customer_name = data.get('customer_name')
+        sob_date = data.get('sob_date')
+        vessel = data.get('vessel')
+        voyage = data.get('voyage')
+        pol = data.get('pol')
+        pod = data.get('pod')
+        fpod = data.get('fpod', '')
         container_no = data.get('container_no')
-        volume = data.get('volume') or ''
-        bl_no = data.get('bl_no', '') or ''
+        volume = data.get('volume')
+        bl_no = data.get('bl_no', '')
 
-        # --------- Find LOCATION from Firestore ----------
+        # ---------- Find LOCATION from Firestore ----------
         def _extract_loc_str(loc_val):
             if isinstance(loc_val, dict):
                 return (loc_val.get('name') or '').strip()
@@ -711,62 +669,75 @@ def send_sob_email():
 
         location_from_db = None
 
+        # Prefer lookup by Firestore document id
         if booking_id:
             try:
-                doc = db.collection("entries").document(booking_id).get()
+                doc_ref = db.collection("entries").document(booking_id)
+                doc = doc_ref.get()
                 if doc.exists:
                     entry = doc.to_dict()
                     location_from_db = _extract_loc_str(entry.get('location'))
                     print(f"[SOB] Location by id {booking_id}: {location_from_db}")
+                else:
+                    print(f"[SOB] No Firestore entry for id {booking_id}")
             except Exception as e:
                 print(f"[SOB] Error fetching entry by id {booking_id}: {e}")
 
+        # Fallback: lookup by bookingNo if still unknown
         if not location_from_db and booking_no:
             try:
-                docs = list(db.collection("entries")
-                            .where("bookingNo", "==", booking_no)
-                            .limit(1).stream())
+                query_ref = db.collection("entries").where("bookingNo", "==", booking_no).limit(1)
+                docs = list(query_ref.stream())
                 if docs:
                     entry = docs[0].to_dict()
                     location_from_db = _extract_loc_str(entry.get('location'))
                     print(f"[SOB] Location by bookingNo {booking_no}: {location_from_db}")
+                else:
+                    print(f"[SOB] No Firestore entry for bookingNo {booking_no}")
             except Exception as e:
                 print(f"[SOB] Error querying by bookingNo {booking_no}: {e}")
 
+        # Last resort: trust request body (or default MUMBAI)
         location = location_from_db or _extract_loc_str(data.get('location')) or "MUMBAI"
         print(f"[SOB] Using location: {location}")
 
-        # --------- Coerce email arrays ----------
+        # ---------- Coerce email arrays ----------
         def _coerce_emails(val):
             if not val:
                 return []
             if isinstance(val, list):
-                return [str(e).strip() for e in val if str(e).strip()]
+                return [e.strip() for e in val if str(e).strip()]
             if isinstance(val, str):
-                return [p.strip() for p in val.split(",") if p.strip()]
+                parts = [p.strip() for p in val.split(",")]
+                return [p for p in parts if p]
             return [str(val).strip()] if str(val).strip() else []
 
         customer_emails = _coerce_emails(customer_email)
         sales_person_emails = _coerce_emails(sales_person_email)
 
         if not customer_emails or not sales_person_emails:
+            print("[SOB] Missing customer_email or sales_person_email")
             return jsonify({"error": "Customer or salesperson email missing"}), 400
 
-        # --------- Container formatting ----------
+        # ---------- Container no formatting ----------
         if container_no is None:
             container_no_str = ""
         elif isinstance(container_no, list):
             container_no_str = ", ".join(str(c) for c in container_no if c)
+        elif isinstance(container_no, str):
+            container_no_str = container_no
         else:
             container_no_str = str(container_no)
 
-        # --------- Pick sender (and app password) by LOCATION ----------
+        # ---------- Pick sender based on LOCATION from DB ----------
         sender_email, sender_password = get_sender_by_location(location)
-        if not sender_password:
-            return jsonify({"error": f"No app password configured for {sender_email}"}), 500
 
-        # --------- Build message ----------
-        subject = f"{customer_name} | SHIPPED ON BOARD | {vessel} | {booking_no} | {bl_no}"
+        # ---------- Compose mail ----------
+        msg = MIMEMultipart('alternative')
+        msg['From'] = sender_email
+        msg['To'] = ", ".join(customer_emails)
+        msg['Cc'] = ", ".join(sales_person_emails)
+        msg['Subject'] = f"{customer_name} | SHIPPED ON BOARD | {vessel} | {booking_no} | {bl_no}"
 
         plain_body = f"""
 Dear Sir/Madam,
@@ -787,144 +758,61 @@ SOB DATE: {sob_date}
 For any queries please write to cs team.
 
 Note: This is an Auto Generated Mail.
-""".strip()
+"""
+        msg.attach(MIMEText(plain_body, 'plain'))
 
         html_body = f"""
 <html>
 <body style="font-family: Arial, sans-serif;">
-  <p>Dear Sir/Madam,</p>
-  <p>We are pleased to confirm your Subject Shipment is Shipped On Board.</p>
-  <p>Details as Below:</p>
-  <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse;">
-    <tr style="background-color: #f2f2f2;">
-      <th>BOOKING NO</th><th>POL</th><th>POD</th><th>FPOD</th>
-      <th>VOLUME</th><th>CONTAINER NO</th><th>VESSEL</th><th>VOYAGE</th><th>SOB DATE</th>
-    </tr>
-    <tr>
-      <td>{booking_no}</td><td>{pol}</td><td>{pod}</td><td>{fpod}</td>
-      <td>{volume}</td><td>{container_no_str or 'N/A'}</td><td>{vessel}</td><td>{voyage}</td><td>{sob_date}</td>
-    </tr>
-  </table>
-  <p>For any queries please write to cs team.</p>
-  <p><em>Note: This is an Auto Generated Mail.</em></p>
+    <p>Dear Sir/Madam,</p>
+    <p>We are pleased to confirm your Subject Shipment is Shipped On Board.</p>
+    <p>Details as Below:</p>
+    <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse;">
+        <tr style="background-color: #f2f2f2;">
+            <th>BOOKING NO</th>
+            <th>POL</th>
+            <th>POD</th>
+            <th>FPOD</th>
+            <th>VOLUME</th>
+            <th>CONTAINER NO</th>
+            <th>VESSEL</th>
+            <th>VOYAGE</th>
+            <th>SOB DATE</th>
+        </tr>
+        <tr>
+            <td>{booking_no}</td>
+            <td>{pol}</td>
+            <td>{pod}</td>
+            <td>{fpod}</td>
+            <td>{volume}</td>
+            <td>{container_no_str if container_no_str else 'N/A'}</td>
+            <td>{vessel}</td>
+            <td>{voyage}</td>
+            <td>{sob_date}</td>
+        </tr>
+    </table>
+    <p>For any queries please write to cs team.</p>
+    <p><em>Note: This is an Auto Generated Mail.</em></p>
 </body>
 </html>
-""".strip()
-
-        msg = MIMEMultipart('alternative')
-        msg['From'] = sender_email
-        msg['To'] = ", ".join(customer_emails)
-        msg['Cc'] = ", ".join(sales_person_emails)
-        msg['Subject'] = subject
-        msg.attach(MIMEText(plain_body, 'plain'))
+"""
         msg.attach(MIMEText(html_body, 'html'))
 
-        recipients = customer_emails + sales_person_emails
+        print(f"[SOB] Sending from {sender_email} (location: {location}) to {customer_emails} CC {sales_person_emails}")
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            print("[SOB] TLS started")
+            server.login(sender_email, normalized_app_password(sender_password))
+            print("[SOB] Login successful")
+            recipients = customer_emails + sales_person_emails
+            server.sendmail(sender_email, recipients, msg.as_string())
+            print("[SOB] Email sent successfully")
 
-        # Prepare payload for background send
-        raw_message = msg.as_string()
+        return jsonify({"message": "Email sent successfully"}), 200
 
-        # Persist a simple email job record in Firestore so we can track status on Render
-        try:
-            job_ref = db.collection('email_jobs').document()
-            job_id = job_ref.id
-            job_ref.set({
-                'status': 'queued',
-                'sender': sender_email,
-                'recipients': recipients,
-                'subject': subject,
-                'created_at': datetime.now().isoformat(),
-            })
-            print(f"[SOB] Created email job {job_id} in Firestore (queued)")
-        except Exception as e:
-            job_id = None
-            print(f"[SOB] Warning: could not create email job in Firestore: {e}")
-
-        # Dispatch actual SMTP send to background thread so the HTTP request
-        # can return immediately. This avoids frontend cancellations when the
-        # SMTP server is slow or when multiple emails are being sent.
-        def _send_sob_email_sync(sender_email_inner, sender_password_inner, recipients_inner, raw_msg):
-            try:
-                with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30) as server:
-                    server.ehlo()
-                    server.starttls()
-                    server.ehlo()
-                    server.login(sender_email_inner, normalized_app_password(sender_password_inner))
-                    server.sendmail(sender_email_inner, recipients_inner, raw_msg)
-                print(f"[SOB] ✅ (background) Email sent via Gmail SMTP from {sender_email_inner} to {recipients_inner}")
-                try:
-                    if job_id:
-                        db.collection('email_jobs').document(job_id).update({
-                            'status': 'sent',
-                            'sent_at': datetime.now().isoformat(),
-                        })
-                except Exception as e:
-                    print(f"[SOB] Warning: failed to update job {job_id} to sent: {e}")
-            except Exception as e:
-                # SMTP may be blocked on some platforms (e.g., Render). Attempt HTTP API fallback via Resend.
-                print(f"[SOB] (background) SMTP send failed: {e}. Attempting Resend fallback...")
-                try:
-                    # Try to reconstruct a basic HTML/plain message for Resend
-                    subject_local = subject
-                    resp = send_via_resend(sender_email_inner, recipients_inner, subject_local, raw_msg, text_body="(sent via fallback)")
-                    print(f"[SOB] ✅ (background) Email sent via Resend fallback to {recipients_inner}")
-                    try:
-                        if job_id:
-                            db.collection('email_jobs').document(job_id).update({
-                                'status': 'sent_via_resend',
-                                'sent_at': datetime.now().isoformat(),
-                                'resend_response': str(resp),
-                            })
-                    except Exception as e3:
-                        print(f"[SOB] Warning: failed to update job {job_id} after Resend send: {e3}")
-                except Exception as e2:
-                    print(f"[SOB] (background) Resend fallback also failed: {e2}")
-                    try:
-                        if job_id:
-                            db.collection('email_jobs').document(job_id).update({
-                                'status': 'failed',
-                                'error': str(e2),
-                                'failed_at': datetime.now().isoformat(),
-                            })
-                    except Exception as e4:
-                        print(f"[SOB] Warning: failed to update job {job_id} to failed: {e4}")
-
-        send_thread = threading.Thread(
-            target=_send_sob_email_sync,
-            args=(sender_email, sender_password, recipients, raw_message),
-            daemon=True,
-        )
-        send_thread.start()
-
-        # Return immediately so frontend doesn't wait for SMTP to complete.
-        print(f"[SOB] Dispatched background send from {sender_email} to {recipients}")
-        return jsonify({"message": "Email dispatch queued"}), 202
-
-    except smtplib.SMTPAuthenticationError as e:
-        print(f"[SOB] Auth error: {e}")
-        return jsonify({"error": "SMTP authentication failed (check app password)"}), 500
-    except smtplib.SMTPConnectError as e:
-        print(f"[SOB] Connect error: {e}")
-        return jsonify({"error": "SMTP connection failed"}), 500
     except Exception as e:
-        print(f"[SOB] General error: {e}")
+        print(f"[SOB] Error sending email: {str(e)}")
         return jsonify({"error": str(e)}), 500
-
-
-@app.route('/api/email-job/<job_id>', methods=['GET'])
-def get_email_job(job_id):
-    try:
-        doc = db.collection('email_jobs').document(job_id).get()
-        if not doc.exists:
-            return jsonify({'error': 'job not found'}), 404
-        data = doc.to_dict()
-        data['id'] = doc.id
-        return jsonify(data), 200
-    except Exception as e:
-        print(f"Error fetching email job {job_id}: {e}")
-        return jsonify({'error': str(e)}), 500
-
-
 
 @app.route('/api/send-selling-email', methods=['POST'])
 def send_selling_email():
