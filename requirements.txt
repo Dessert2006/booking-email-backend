@@ -92,3 +92,13 @@ gunicorn
 schedule
 firebase-admin
 resend==2.4.0
+Flask==2.3.3
+flask-cors==4.0.0
+python-dotenv==1.0.0
+schedule==1.2.0
+pandas==2.0.3
+pytz==2023.3
+google-cloud-firestore==2.13.0
+firebase-admin==6.2.0
+requests==2.31.0
+resend==1.0.0
