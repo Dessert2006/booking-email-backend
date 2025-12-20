@@ -1,65 +1,11 @@
-# Core Flask & Web
 Flask==3.1.1
 flask-cors==6.0.1
-Werkzeug==3.1.3
-Jinja2==3.1.6
-MarkupSafe==3.0.2
-itsdangerous==2.2.0
-click==8.2.1
-blinker==1.9.0
 gunicorn==23.0.0
-
-# Email & APIs
 resend==2.4.0
 requests==2.32.3
-requests-oauthlib==2.0.0
-
-# Firebase & Database
 firebase-admin==7.1.0
 google-cloud-firestore==2.13.0
-google-api-core==2.24.2
-google-auth==2.40.2
-google-auth-httplib2==0.2.0
-google-auth-oauthlib==1.2.2
-google-api-python-client==2.170.0
-googleapis-common-protos==1.70.0
-cachetools==5.5.2
-proto-plus==1.26.1
-protobuf==6.31.0
-
-# Scheduling & Utilities
-schedule==1.2.2
 python-dotenv==1.1.0
-pytz==2025.2
-
-# Data Processing
+schedule==1.2.2
 pandas==2.2.3
-numpy==2.2.6
-openpyxl==3.1.5
-python-dateutil==2.9.0.post0
-six==1.17.0
-tzdata==2025.2
-et_xmlfile==2.0.0
-xlrd==1.2.0
-
-# Security & Networking
-certifi==2025.4.26
-charset-normalizer==3.4.2
-idna==3.10
-urllib3==2.4.0
-pyasn1==0.6.1
-pyasn1_modules==0.4.2
-rsa==4.9.1
-oauthlib==3.2.2
-cffi==1.17.1
-pycparser==2.22
-
-# Additional (from your original file, but keep only necessary ones)
-beautifulsoup4==4.13.4
-soupsieve==2.7
-lxml==5.4.0
-selenium==4.15.2
-webdriver-manager==4.0.2
-undetected-chromedriver==3.4.6
-tenacity==9.1.2
-tqdm==4.67.1
+pytz==2025.2
