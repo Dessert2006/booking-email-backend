@@ -13,6 +13,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import pytz
 import traceback
+import socket
 from firebase_admin import credentials, firestore, initialize_app
 
 # Load environment variables
@@ -841,6 +842,56 @@ Note: This is an Auto Generated Mail.
     except Exception as e:
         print(f"[SOB] Error sending email: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/check-smtp', methods=['GET'])
+def check_smtp():
+    """Check outbound connectivity to SMTP server (TCP connect + optional STARTTLS handshake).
+    Returns JSON describing results. Use query params `host`, `port`, and `timeout` to override.
+    """
+    try:
+        host = request.args.get('host', SMTP_SERVER)
+        port = int(request.args.get('port', SMTP_PORT))
+        timeout = int(request.args.get('timeout', 10))
+        print(f"[CHECK-SMTP] Testing TCP connect to {host}:{port} with timeout {timeout}s")
+
+        # Test raw TCP connect
+        try:
+            sock = socket.create_connection((host, port), timeout=timeout)
+            sock.close()
+            tcp_ok = True
+            print(f"[CHECK-SMTP] TCP connect to {host}:{port} succeeded")
+        except Exception as e_tcp:
+            print(f"[CHECK-SMTP][ERROR] TCP connect failed: {e_tcp}")
+            traceback.print_exc()
+            return jsonify({"ok": False, "tcp_connect": False, "error": str(e_tcp)}), 200
+
+        # Try an SMTP handshake (EHLO + STARTTLS if supported)
+        try:
+            with smtplib.SMTP(host, port, timeout=timeout) as s:
+                s.ehlo()
+                has_starttls = s.has_extn('STARTTLS')
+                print(f"[CHECK-SMTP] Server STARTTLS supported: {has_starttls}")
+                if has_starttls:
+                    try:
+                        s.starttls()
+                        s.ehlo()
+                        print("[CHECK-SMTP] STARTTLS handshake succeeded")
+                    except Exception as e_tls:
+                        print(f"[CHECK-SMTP][ERROR] STARTTLS failed: {e_tls}")
+                        traceback.print_exc()
+                        return jsonify({"ok": False, "tcp_connect": True, "smtp_handshake": False, "error": str(e_tls)}), 200
+        except Exception as e_smtp:
+            print(f"[CHECK-SMTP][ERROR] SMTP connect/ehlo failed: {e_smtp}")
+            traceback.print_exc()
+            return jsonify({"ok": False, "tcp_connect": True, "smtp_handshake": False, "error": str(e_smtp)}), 200
+
+        return jsonify({"ok": True, "tcp_connect": True, "smtp_handshake": True}), 200
+
+    except Exception as e:
+        print(f"[CHECK-SMTP][FATAL] {e}")
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.route('/api/send-selling-email', methods=['POST'])
 def send_selling_email():
