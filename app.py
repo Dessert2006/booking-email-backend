@@ -12,6 +12,7 @@ import threading
 import pandas as pd
 from datetime import datetime, timedelta
 import pytz
+import traceback
 from firebase_admin import credentials, firestore, initialize_app
 
 # Load environment variables
@@ -39,7 +40,7 @@ SMTP_PORT = 587
 
 # You can move these to env vars if you prefer; leaving as-is for drop-in compatibility
 SENDER_EMAIL_MUMBAI = "info@dessertmarine.com"
-SENDER_PASSWORD_MUMBAI = "gsxb yivs dscy hkrk"      # app password (Gmail shows spaces)
+SENDER_PASSWORD_MUMBAI = "wrkq sobg qdyc ujff"      # app password (Gmail shows spaces)
 SENDER_EMAIL_GUJARAT = "mundra@dessertmarine.com"
 SENDER_PASSWORD_GUJARAT = "aljw cixn pbok lxpk"     # app password (with spaces)
 
@@ -799,14 +800,41 @@ Note: This is an Auto Generated Mail.
         msg.attach(MIMEText(html_body, 'html'))
 
         print(f"[SOB] Sending from {sender_email} (location: {location}) to {customer_emails} CC {sales_person_emails}")
+        # Extra debug info to help diagnose SMTP/login/send failures
+        try:
+            raw_pw = sender_password
+            norm_pw = normalized_app_password(sender_password)
+        except Exception as _pw_e:
+            raw_pw = '<error retrieving>'
+            norm_pw = '<error normalizing>'
+        print(f"[SOB][DEBUG] sender_email={sender_email}, raw_password_len={len(str(raw_pw)) if raw_pw is not None else 'NA'}, normalized_password_len={len(str(norm_pw)) if norm_pw is not None else 'NA'}")
+
+        recipients = customer_emails + sales_person_emails
+        print(f"[SOB][DEBUG] recipients={recipients}")
+        body_preview = (plain_body[:500] + '...') if len(plain_body) > 500 else plain_body
+        print(f"[SOB][DEBUG] plain_body_preview={body_preview}")
+
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            print("[SOB] TLS started")
-            server.login(sender_email, normalized_app_password(sender_password))
-            print("[SOB] Login successful")
-            recipients = customer_emails + sales_person_emails
-            server.sendmail(sender_email, recipients, msg.as_string())
-            print("[SOB] Email sent successfully")
+            try:
+                server.set_debuglevel(0)
+                server.starttls()
+                print("[SOB] TLS started")
+                server.login(sender_email, norm_pw)
+                print("[SOB] Login successful")
+            except Exception as e:
+                print(f"[SOB][ERROR] SMTP login failed: {str(e)}")
+                traceback.print_exc()
+                return jsonify({"error": "SMTP login failed", "details": str(e)}), 500
+
+            try:
+                msg_str = msg.as_string()
+                print(f"[SOB][DEBUG] message_size={len(msg_str)} bytes")
+                server.sendmail(sender_email, recipients, msg_str)
+                print("[SOB] Email sent successfully")
+            except Exception as e:
+                print(f"[SOB][ERROR] SMTP sendmail failed: {str(e)}")
+                traceback.print_exc()
+                return jsonify({"error": "SMTP send failed", "details": str(e)}), 502
 
         return jsonify({"message": "Email sent successfully"}), 200
 
