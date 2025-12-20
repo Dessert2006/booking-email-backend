@@ -25,6 +25,21 @@ app = Flask(__name__)
 # Temporarily allow all origins to diagnose Render preflight/CORS issues.
 CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
 
+
+@app.before_request
+def log_incoming_request():
+    try:
+        info = {
+            'method': request.method,
+            'path': request.path,
+            'remote_addr': request.remote_addr,
+            'origin': request.headers.get('Origin'),
+            'content_type': request.headers.get('Content-Type')
+        }
+        print(f"[INCOMING] {info}")
+    except Exception as e:
+        print(f"[INCOMING][ERROR] failed to log request: {e}")
+
 # Initialize Firestore
 credential_path = os.environ.get(
     "GOOGLE_APPLICATION_CREDENTIALS",
