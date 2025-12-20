@@ -161,67 +161,52 @@ def send_via_sendgrid(sender_email, sender_name, to_emails, cc_emails, subject, 
 def send_email_smart(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body):
     """
     Smart email sending that chooses the best provider.
-    Priority: Resend > SendGrid > SMTP (only if not on Render)
     """
-    # On Render, always use API-based providers
-    if IS_RENDER:
-        print("[EMAIL] Running on Render, using API-based email providers")
-        
-        # Try Resend first
-        if RESEND_API_KEY:
-            print("[EMAIL] Trying Resend...")
-            ok, details = send_via_resend(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body)
-            if ok:
-                return True, f"Resend: {details}"
-        
-        # Try SendGrid as fallback
-        if SENDGRID_API_KEY:
-            print("[EMAIL] Trying SendGrid...")
-            ok, details = send_via_sendgrid(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body)
-            if ok:
-                return True, f"SendGrid: {details}"
-        
-        return False, "No email API keys configured for Render"
+    print(f"[EMAIL] Attempting to send email from: {sender_email}")
     
-    # Local development: Try SMTP first, then APIs
-    else:
-        print("[EMAIL] Running locally, trying SMTP first...")
-        try:
-            # Try SMTP
-            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-                server.starttls()
-                server.login(sender_email, normalized_app_password(SENDER_PASSWORD_MUMBAI))
-                
-                msg = MIMEMultipart('alternative')
-                msg['From'] = sender_email
-                msg['To'] = ", ".join(to_emails)
-                if cc_emails:
-                    msg['Cc'] = ", ".join(cc_emails)
-                msg['Subject'] = subject
-                
-                msg.attach(MIMEText(plain_body, 'plain'))
-                msg.attach(MIMEText(html_body, 'html'))
-                
-                recipients = to_emails + cc_emails
-                server.sendmail(sender_email, recipients, msg.as_string())
-                print("[EMAIL] Sent via SMTP")
-                return True, "SMTP"
-                
-        except Exception as e:
-            print(f"[EMAIL] SMTP failed: {e}")
-            # Fallback to Resend
-            if RESEND_API_KEY:
-                ok, details = send_via_resend(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body)
-                if ok:
-                    return True, f"Resend (fallback): {details}"
+    # Try SMTP first (even on Render - might work with Gmail)
+    try:
+        print("[EMAIL] Trying SMTP...")
+        # Use Mumbai credentials for all emails temporarily
+        smtp_email = "info@dessertmarine.com"
+        smtp_password = "wrkq sobg qdyc ujff"  # Your Gmail app password
+        
+        msg = MIMEMultipart('alternative')
+        msg['From'] = f"{sender_name} <{smtp_email}>"
+        msg['To'] = ", ".join(to_emails)
+        if cc_emails:
+            msg['Cc'] = ", ".join(cc_emails)
+        msg['Subject'] = subject
+        
+        msg.attach(MIMEText(plain_body, 'plain'))
+        msg.attach(MIMEText(html_body, 'html'))
+        
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=10) as server:
+            server.starttls()
+            server.login(smtp_email, normalized_app_password(smtp_password))
+            recipients = to_emails + cc_emails
+            server.sendmail(smtp_email, recipients, msg.as_string())
+            print("[EMAIL] Sent via SMTP (Gmail)")
+            return True, "SMTP (Gmail)"
             
-            # Fallback to SendGrid
-            if SENDGRID_API_KEY:
-                ok, details = send_via_sendgrid(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body)
-                if ok:
-                    return True, f"SendGrid (fallback): {details}"
-            
-            return False, f"All methods failed: {str(e)}"
+    except Exception as e:
+        print(f"[EMAIL] SMTP failed: {str(e)}")
+    
+    # Then try Resend
+    if RESEND_API_KEY:
+        print("[EMAIL] Trying Resend...")
+        ok, details = send_via_resend(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body)
+        if ok:
+            return True, f"Resend: {details}"
+    
+    # Then try SendGrid if you have the key
+    if SENDGRID_API_KEY:
+        print("[EMAIL] Trying SendGrid...")
+        ok, details = send_via_sendgrid(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body)
+        if ok:
+            return True, f"SendGrid: {details}"
+    
+    return False, "All email methods failed"
 
 def parse_si_cutoff_date(si_cutoff):
     """Parse SI cutoff date from dd/mm-hhmm HRS format to timezone-aware datetime."""
