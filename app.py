@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 import pytz
 import traceback
 import socket
+import requests
 from firebase_admin import credentials, firestore, initialize_app
 
 # Load environment variables
@@ -79,6 +80,49 @@ def get_sender_by_location(location):
         if "GUJARAT" in loc:
             return BRANCH_EMAILS["GUJARAT"]
     return BRANCH_EMAILS["MUMBAI"]
+
+
+def send_via_sendgrid(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body):
+    """Send email using SendGrid Web API v3. Returns (ok, details)."""
+    api_key = os.environ.get('SENDGRID_API_KEY')
+    if not api_key:
+        return False, 'SENDGRID_API_KEY not set'
+
+    url = 'https://api.sendgrid.com/v3/mail/send'
+    headers = {
+        'Authorization': f'Bearer {api_key}',
+        'Content-Type': 'application/json'
+    }
+
+    def to_list(emails):
+        out = []
+        for e in emails:
+            if isinstance(e, str) and e:
+                out.append({"email": e})
+        return out
+
+    payload = {
+        "personalizations": [
+            {
+                "to": to_list(to_emails),
+                "cc": to_list(cc_emails)
+            }
+        ],
+        "from": {"email": sender_email, "name": sender_name or ""},
+        "subject": subject,
+        "content": [
+            {"type": "text/plain", "value": plain_body},
+            {"type": "text/html", "value": html_body}
+        ]
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=15)
+        if resp.status_code in (200, 202):
+            return True, f'status={resp.status_code}'
+        return False, f'status={resp.status_code}, body={resp.text}'
+    except Exception as e:
+        return False, str(e)
 
 def parse_si_cutoff_date(si_cutoff):
     """Parse SI cutoff date from dd/mm-hhmm HRS format (e.g., 12/06-1400 HRS) to timezone-aware datetime."""
@@ -832,6 +876,28 @@ Note: This is an Auto Generated Mail.
         body_preview = (plain_body[:500] + '...') if len(plain_body) > 500 else plain_body
         print(f"[SOB][DEBUG] plain_body_preview={body_preview}")
 
+        # Quick TCP check to SMTP server — if blocked on Render, fallback to SendGrid
+        try:
+            sock = socket.create_connection((SMTP_SERVER, SMTP_PORT), timeout=5)
+            sock.close()
+            smtp_reachable = True
+            print(f"[SOB] SMTP server {SMTP_SERVER}:{SMTP_PORT} reachable (TCP)")
+        except Exception as e_tcp:
+            smtp_reachable = False
+            print(f"[SOB][WARN] SMTP TCP connect failed: {e_tcp}")
+            traceback.print_exc()
+
+        if not smtp_reachable:
+            print("[SOB] Falling back to SendGrid due to unreachable SMTP")
+            ok, details = send_via_sendgrid(sender_email, customer_name, customer_emails, sales_person_emails, msg['Subject'], plain_body, html_body)
+            if ok:
+                print(f"[SOB] Sent via SendGrid: {details}")
+                return jsonify({"message": "Email sent via SendGrid"}), 200
+            else:
+                print(f"[SOB][ERROR] SendGrid fallback failed: {details}")
+                return jsonify({"error": "Both SMTP and SendGrid failed", "details": details}), 502
+
+        # Proceed with SMTP send if reachable
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
             try:
                 server.set_debuglevel(0)
@@ -840,9 +906,13 @@ Note: This is an Auto Generated Mail.
                 server.login(sender_email, norm_pw)
                 print("[SOB] Login successful")
             except Exception as e:
-                print(f"[SOB][ERROR] SMTP login failed: {str(e)}")
+                print(f"[SOB][ERROR] SMTP login failed: {str(e)} — attempting SendGrid fallback")
                 traceback.print_exc()
-                return jsonify({"error": "SMTP login failed", "details": str(e)}), 500
+                ok, details = send_via_sendgrid(sender_email, customer_name, customer_emails, sales_person_emails, msg['Subject'], plain_body, html_body)
+                if ok:
+                    print(f"[SOB] Sent via SendGrid after SMTP login failure: {details}")
+                    return jsonify({"message": "Email sent via SendGrid"}), 200
+                return jsonify({"error": "SMTP login failed and SendGrid fallback failed", "details": str(e)}), 500
 
             try:
                 msg_str = msg.as_string()
@@ -850,9 +920,13 @@ Note: This is an Auto Generated Mail.
                 server.sendmail(sender_email, recipients, msg_str)
                 print("[SOB] Email sent successfully")
             except Exception as e:
-                print(f"[SOB][ERROR] SMTP sendmail failed: {str(e)}")
+                print(f"[SOB][ERROR] SMTP sendmail failed: {str(e)} — attempting SendGrid fallback")
                 traceback.print_exc()
-                return jsonify({"error": "SMTP send failed", "details": str(e)}), 502
+                ok, details = send_via_sendgrid(sender_email, customer_name, customer_emails, sales_person_emails, msg['Subject'], plain_body, html_body)
+                if ok:
+                    print(f"[SOB] Sent via SendGrid after SMTP send failure: {details}")
+                    return jsonify({"message": "Email sent via SendGrid"}), 200
+                return jsonify({"error": "SMTP send failed and SendGrid fallback failed", "details": str(e)}), 502
 
         return jsonify({"message": "Email sent successfully"}), 200
 
