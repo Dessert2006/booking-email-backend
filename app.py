@@ -15,6 +15,7 @@ import pytz
 import traceback
 import socket
 import requests
+import resend  # ADDED: Resend library
 from firebase_admin import credentials, firestore, initialize_app
 
 # Load environment variables
@@ -22,24 +23,7 @@ load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
-# Allow CORS for API endpoints. In production, restrict origins to your frontend domain(s).
-# Temporarily allow all origins to diagnose Render preflight/CORS issues.
-CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
-
-
-@app.before_request
-def log_incoming_request():
-    try:
-        info = {
-            'method': request.method,
-            'path': request.path,
-            'remote_addr': request.remote_addr,
-            'origin': request.headers.get('Origin'),
-            'content_type': request.headers.get('Content-Type')
-        }
-        print(f"[INCOMING] {info}")
-    except Exception as e:
-        print(f"[INCOMING][ERROR] failed to log request: {e}")
+CORS(app, resources={r"/api/*": {"origins": ["http://localhost:3000", "https://booking-report.vercel.app"]}})
 
 # Initialize Firestore
 credential_path = os.environ.get(
@@ -57,22 +41,28 @@ db = firestore.client()
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 
-# You can move these to env vars if you prefer; leaving as-is for drop-in compatibility
+# Email credentials
 SENDER_EMAIL_MUMBAI = "info@dessertmarine.com"
-SENDER_PASSWORD_MUMBAI = "wrkq sobg qdyc ujff"      # app password (Gmail shows spaces)
+SENDER_PASSWORD_MUMBAI = "wrkq sobg qdyc ujff"
 SENDER_EMAIL_GUJARAT = "mundra@dessertmarine.com"
-SENDER_PASSWORD_GUJARAT = "aljw cixn pbok lxpk"     # app password (with spaces)
+SENDER_PASSWORD_GUJARAT = "zvvw gynt tedl ihbq"
 
 BRANCH_EMAILS = {
     "MUMBAI": (SENDER_EMAIL_MUMBAI, SENDER_PASSWORD_MUMBAI),
     "GUJARAT": (SENDER_EMAIL_GUJARAT, SENDER_PASSWORD_GUJARAT),
 }
 
+# Check if we're on Render
+IS_RENDER = os.environ.get('RENDER', '').lower() == 'true'
+RESEND_API_KEY = os.environ.get('RESEND_API_KEY')
+SENDGRID_API_KEY = os.environ.get('SENDGRID_API_KEY')
+
 def normalized_app_password(pw: str) -> str:
     """Gmail app passwords are shown with spaces; SMTP expects no spaces."""
     return pw.replace(" ", "") if isinstance(pw, str) else pw
 
 def get_sender_by_location(location):
+    """Get email credentials based on location."""
     if location:
         loc = str(location).strip().upper()
         if "MUMBAI" in loc:
@@ -81,26 +71,70 @@ def get_sender_by_location(location):
             return BRANCH_EMAILS["GUJARAT"]
     return BRANCH_EMAILS["MUMBAI"]
 
+def send_via_resend(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body):
+    """Send email using Resend API."""
+    if not RESEND_API_KEY:
+        return False, 'RESEND_API_KEY not set'
+    
+    resend.api_key = RESEND_API_KEY
+    
+    try:
+        # Prepare recipients
+        to_list = []
+        for email in to_emails:
+            if isinstance(email, str) and email.strip():
+                to_list.append(email.strip())
+        
+        cc_list = []
+        for email in cc_emails:
+            if isinstance(email, str) and email.strip():
+                cc_list.append(email.strip())
+        
+        # Prepare from address with name
+        from_address = f"{sender_name} <{sender_email}>" if sender_name else sender_email
+        
+        # Build email params
+        params = {
+            "from": from_address,
+            "to": to_list,
+            "subject": subject,
+            "html": html_body,
+            "text": plain_body,
+        }
+        
+        # Add CC if exists
+        if cc_list:
+            params["cc"] = cc_list
+        
+        # Send email
+        response = resend.Emails.send(params)
+        email_id = response.get('id', 'unknown')
+        print(f"[RESEND] Email sent successfully! ID: {email_id}")
+        return True, f"Email sent (ID: {email_id})"
+        
+    except Exception as e:
+        print(f"[RESEND][ERROR] {str(e)}")
+        traceback.print_exc()
+        return False, str(e)
 
 def send_via_sendgrid(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body):
-    """Send email using SendGrid Web API v3. Returns (ok, details)."""
-    api_key = os.environ.get('SENDGRID_API_KEY')
-    if not api_key:
+    """Send email using SendGrid Web API v3."""
+    if not SENDGRID_API_KEY:
         return False, 'SENDGRID_API_KEY not set'
-
+    
     url = 'https://api.sendgrid.com/v3/mail/send'
     headers = {
-        'Authorization': f'Bearer {api_key}',
+        'Authorization': f'Bearer {SENDGRID_API_KEY}',
         'Content-Type': 'application/json'
     }
-
+    
     def to_list(emails):
         out = []
         for e in emails:
             if isinstance(e, str) and e:
                 out.append({"email": e})
         return out
-
+    
     payload = {
         "personalizations": [
             {
@@ -115,7 +149,7 @@ def send_via_sendgrid(sender_email, sender_name, to_emails, cc_emails, subject, 
             {"type": "text/html", "value": html_body}
         ]
     }
-
+    
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=15)
         if resp.status_code in (200, 202):
@@ -124,8 +158,73 @@ def send_via_sendgrid(sender_email, sender_name, to_emails, cc_emails, subject, 
     except Exception as e:
         return False, str(e)
 
+def send_email_smart(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body):
+    """
+    Smart email sending that chooses the best provider.
+    Priority: Resend > SendGrid > SMTP (only if not on Render)
+    """
+    # On Render, always use API-based providers
+    if IS_RENDER:
+        print("[EMAIL] Running on Render, using API-based email providers")
+        
+        # Try Resend first
+        if RESEND_API_KEY:
+            print("[EMAIL] Trying Resend...")
+            ok, details = send_via_resend(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body)
+            if ok:
+                return True, f"Resend: {details}"
+        
+        # Try SendGrid as fallback
+        if SENDGRID_API_KEY:
+            print("[EMAIL] Trying SendGrid...")
+            ok, details = send_via_sendgrid(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body)
+            if ok:
+                return True, f"SendGrid: {details}"
+        
+        return False, "No email API keys configured for Render"
+    
+    # Local development: Try SMTP first, then APIs
+    else:
+        print("[EMAIL] Running locally, trying SMTP first...")
+        try:
+            # Try SMTP
+            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+                server.starttls()
+                server.login(sender_email, normalized_app_password(SENDER_PASSWORD_MUMBAI))
+                
+                msg = MIMEMultipart('alternative')
+                msg['From'] = sender_email
+                msg['To'] = ", ".join(to_emails)
+                if cc_emails:
+                    msg['Cc'] = ", ".join(cc_emails)
+                msg['Subject'] = subject
+                
+                msg.attach(MIMEText(plain_body, 'plain'))
+                msg.attach(MIMEText(html_body, 'html'))
+                
+                recipients = to_emails + cc_emails
+                server.sendmail(sender_email, recipients, msg.as_string())
+                print("[EMAIL] Sent via SMTP")
+                return True, "SMTP"
+                
+        except Exception as e:
+            print(f"[EMAIL] SMTP failed: {e}")
+            # Fallback to Resend
+            if RESEND_API_KEY:
+                ok, details = send_via_resend(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body)
+                if ok:
+                    return True, f"Resend (fallback): {details}"
+            
+            # Fallback to SendGrid
+            if SENDGRID_API_KEY:
+                ok, details = send_via_sendgrid(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body)
+                if ok:
+                    return True, f"SendGrid (fallback): {details}"
+            
+            return False, f"All methods failed: {str(e)}"
+
 def parse_si_cutoff_date(si_cutoff):
-    """Parse SI cutoff date from dd/mm-hhmm HRS format (e.g., 12/06-1400 HRS) to timezone-aware datetime."""
+    """Parse SI cutoff date from dd/mm-hhmm HRS format to timezone-aware datetime."""
     try:
         date_part, time_part = si_cutoff.split('-')
         hour_minute = time_part.replace(" HRS", "").strip()
@@ -226,9 +325,7 @@ def fetch_si_cutoff_data():
         return {}
 
 def send_si_cutoff_reminder():
-    """
-    Send SI cutoff reminders 48 and 24 hours before the cutoff date.
-    """
+    """Send SI cutoff reminders 48 and 24 hours before the cutoff date."""
     try:
         si_cutoff_data = fetch_si_cutoff_data()
         if not si_cutoff_data:
@@ -258,13 +355,11 @@ def send_si_cutoff_reminder():
                     reminder_type = "24 hours"
 
                 if reminder_type:
-                    sender_email, sender_password = get_sender_by_location(booking.get("Location", "MUMBAI"))
-                    msg = MIMEMultipart('alternative')
-                    msg['From'] = sender_email
-                    msg['To'] = ", ".join(customer_emails)
-                    msg['Cc'] = ", ".join(booking["Sales Person Emails"])
-                    msg['Subject'] = f"!! Reminder for Pending SI !! Booking No: {booking['Booking No']} // Vessel: {booking['Vessel']} // Customer Name: {booking['Customer Name']}"
-
+                    sender_email, _ = get_sender_by_location(booking.get("Location", "MUMBAI"))
+                    sender_name = "Dessert Marine Services"
+                    
+                    subject = f"!! Reminder for Pending SI !! Booking No: {booking['Booking No']} // Vessel: {booking['Vessel']} // Customer Name: {booking['Customer Name']}"
+                    
                     plain_body = f"""
 Dear Sir / Madam,
 
@@ -291,8 +386,6 @@ Dessert Marine Services (I) Pvt Ltd
 info@dessertmarine.com
 doc@dessertmarine.com
 """
-                    msg.attach(MIMEText(plain_body, 'plain'))
-
                     html_body = f"""
 <html>
 <body style="font-family: Arial, sans-serif;">
@@ -329,17 +422,20 @@ doc@dessertmarine.com
 </body>
 </html>
 """
-                    msg.attach(MIMEText(html_body, 'html'))
-
-                    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-                        server.starttls()
-                        server.login(sender_email, normalized_app_password(sender_password))
-                        recipients = customer_emails + booking["Sales Person Emails"]
-                        server.sendmail(sender_email, recipients, msg.as_string())
-                        print(f"SI Cutoff reminder ({reminder_type}) sent to {customer_emails} (CC: {booking['Sales Person Emails']}) for booking {booking['Booking No']}")
+                    # Use smart email sending
+                    ok, details = send_email_smart(
+                        sender_email, sender_name, customer_emails, 
+                        booking["Sales Person Emails"], subject, plain_body, html_body
+                    )
+                    
+                    if ok:
+                        print(f"SI Cutoff reminder ({reminder_type}) sent to {customer_emails} (CC: {booking['Sales Person Emails']}) for booking {booking['Booking No']} via {details}")
+                    else:
+                        print(f"Failed to send SI Cutoff reminder: {details}")
 
     except Exception as e:
         print(f"Error sending SI cutoff reminders: {str(e)}")
+        traceback.print_exc()
 
 def fetch_pending_si_data():
     """
@@ -416,10 +512,7 @@ def fetch_pending_si_data():
         return []
 
 def generate_pending_si_excel(data):
-    """
-    Generate an Excel file with the pending SI data.
-    Returns the filename of the generated Excel file.
-    """
+    """Generate an Excel file with the pending SI data."""
     if not data:
         print("No pending SI data to generate Excel report.")
         return None
@@ -432,10 +525,7 @@ def generate_pending_si_excel(data):
     return excel_filename
 
 def send_pending_si_report():
-    """
-    Send a daily report at 6:00 PM IST with bookings where SI cutoff is within the next 24 hours.
-    Includes the records in the email body as an HTML table and attaches an Excel file.
-    """
+    """Send a daily report at 6:00 PM IST with pending SI bookings."""
     try:
         pending_si_data = fetch_pending_si_data()
         if not pending_si_data:
@@ -445,27 +535,23 @@ def send_pending_si_report():
         # Sort the data by ETD (earliest first)
         pending_si_data.sort(key=lambda x: pd.to_datetime(x.get('ETD', ''), errors='coerce'))
 
-        for booking in pending_si_data:
-            print(f"Pending SI booking: {booking}")
-
         excel_file = generate_pending_si_excel(pending_si_data)
         if not excel_file:
             print("Failed to generate Excel file for pending SI report.")
             return
 
-        sender_email, sender_password = SENDER_EMAIL_MUMBAI, SENDER_PASSWORD_MUMBAI
-        msg = MIMEMultipart('alternative')
-        msg['From'] = sender_email
-        msg['To'] = ", ".join(["info@dessertmarine.com", "doc@dessertmarine.com"])
-        msg['Cc'] = "chirag@dessertmarine.com"
-        msg['Subject'] = f"PENDING SI : | {datetime.now().strftime('%Y-%m-%d')}"
+        # Read Excel file for attachment
+        with open(excel_file, 'rb') as f:
+            excel_content = f.read()
 
-        plain_body = """
-Dear Team,
-
-Please find below the list of bookings with SI cutoff dates within the next 24 hours.
-
-"""
+        # Email content
+        sender_email = SENDER_EMAIL_MUMBAI
+        sender_name = "Dessert Marine Services"
+        to_emails = ["info@dessertmarine.com", "doc@dessertmarine.com"]
+        cc_emails = ["chirag@dessertmarine.com"]
+        subject = f"PENDING SI : | {datetime.now().strftime('%Y-%m-%d')}"
+        
+        plain_body = "Dear Team,\n\nPlease find below the list of bookings with SI cutoff dates within the next 24 hours.\n\n"
         for booking in pending_si_data:
             plain_body += f"""
 Booking No: {booking['Booking No']}
@@ -476,13 +562,8 @@ Vessel: {booking['Vessel']}
 ETD: {booking['ETD']}
 SI Cutoff: {booking['SI Cutoff']}
 """
-        plain_body += """
-An Excel file with the details is also attached.
-
-Note: This is an Auto Generated Mail.
-"""
-        msg.attach(MIMEText(plain_body, 'plain'))
-
+        plain_body += "\nAn Excel file with the details is also attached.\n\nNote: This is an Auto Generated Mail."
+        
         html_body = f"""
 <html>
 <body style="font-family: Arial, sans-serif;">
@@ -518,30 +599,61 @@ Note: This is an Auto Generated Mail.
 </body>
 </html>
 """
-        msg.attach(MIMEText(html_body, 'html'))
-
-        with open(excel_file, 'rb') as f:
-            attachment = MIMEApplication(f.read(), _subtype="xlsx")
-            attachment.add_header('Content-Disposition', 'attachment', filename=excel_file)
-            msg.attach(attachment)
-
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(sender_email, normalized_app_password(sender_password))
-            recipients = ["info@dessertmarine.com", "doc@dessertmarine.com", "chirag@dessertmarine.com"]
-            server.sendmail(sender_email, recipients, msg.as_string())
-            print(f"Pending SI report sent to {msg['To']} (CC: {msg['Cc']})")
-
-        os.remove(excel_file)
+        
+        # For API-based email services, we need to handle attachments differently
+        # Since Resend/SendGrid API don't easily support attachments in this simple implementation,
+        # we'll send without attachment for now, or use SMTP if local
+        if not IS_RENDER:
+            # Local: Use SMTP with attachment
+            try:
+                msg = MIMEMultipart('alternative')
+                msg['From'] = sender_email
+                msg['To'] = ", ".join(to_emails)
+                msg['Cc'] = ", ".join(cc_emails)
+                msg['Subject'] = subject
+                
+                msg.attach(MIMEText(plain_body, 'plain'))
+                msg.attach(MIMEText(html_body, 'html'))
+                
+                # Attach Excel file
+                attachment = MIMEApplication(excel_content, _subtype="xlsx")
+                attachment.add_header('Content-Disposition', 'attachment', filename=excel_file)
+                msg.attach(attachment)
+                
+                with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+                    server.starttls()
+                    server.login(sender_email, normalized_app_password(SENDER_PASSWORD_MUMBAI))
+                    recipients = to_emails + cc_emails
+                    server.sendmail(sender_email, recipients, msg.as_string())
+                    print(f"Pending SI report sent via SMTP")
+            except Exception as e:
+                print(f"SMTP failed for pending SI report: {e}")
+                # Fallback to API without attachment
+                ok, details = send_email_smart(sender_email, sender_name, to_emails, cc_emails, 
+                                              subject + " (No attachment - SMTP failed)", plain_body, html_body)
+                if ok:
+                    print(f"Pending SI report sent via API (no attachment): {details}")
+        else:
+            # On Render: Use API without attachment for now
+            plain_body += "\n\n[Note: Excel attachment not available via API on Render]"
+            html_body += "<p><em>[Note: Excel attachment not available via API on Render]</em></p>"
+            
+            ok, details = send_email_smart(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body)
+            if ok:
+                print(f"Pending SI report sent via API: {details}")
+            else:
+                print(f"Failed to send pending SI report: {details}")
+        
+        # Clean up
+        if os.path.exists(excel_file):
+            os.remove(excel_file)
 
     except Exception as e:
         print(f"Error sending pending SI report: {str(e)}")
+        traceback.print_exc()
 
 def fetch_royal_castor_data():
-    """
-    Fetch bookings for Royal Castor where referenceNo exists.
-    Returns a list of dictionaries with the required fields.
-    """
+    """Fetch bookings for Royal Castor where referenceNo exists."""
     try:
         bookings_ref = db.collection("entries")
         docs = bookings_ref.stream()
@@ -604,9 +716,7 @@ def fetch_royal_castor_data():
         return []
 
 def send_royal_castor_vessel_update():
-    """
-    Send a daily vessel update email at 7:30 PM IST to Royal Castor for bookings with a referenceNo.
-    """
+    """Send daily vessel update to Royal Castor."""
     try:
         royal_castor_data = fetch_royal_castor_data()
         if not royal_castor_data:
@@ -616,23 +726,14 @@ def send_royal_castor_vessel_update():
         # Sort the data by ETD (earliest to latest)
         royal_castor_data.sort(key=lambda x: pd.to_datetime(x.get('ETD', ''), errors='coerce'))
 
-        for booking in royal_castor_data:
-            print(f"Royal Castor booking: {booking}")
-
-        sender_email, sender_password = SENDER_EMAIL_MUMBAI, SENDER_PASSWORD_MUMBAI
-        customer_email = royal_castor_data[0]["Customer Email"]
-        msg = MIMEMultipart('alternative')
-        msg['From'] = sender_email
-        msg['To'] = customer_email
-        msg['Cc'] = "info@dessertmarine.com"
-        msg['Subject'] = f"Daily Vessel Update : {datetime.now().strftime('%Y-%m-%d')} || Royal Castor"
-
-        plain_body = """
-Dear Royal Castor Team,
-
-Please find below the daily vessel update.
-
-"""
+        sender_email = SENDER_EMAIL_MUMBAI
+        sender_name = "Dessert Marine Services"
+        customer_email = royal_castor_data[0]["Customer Email"] if royal_castor_data else "UJWALA@ROYALCASTOR.IN"
+        to_emails = [customer_email]
+        cc_emails = ["info@dessertmarine.com"]
+        subject = f"Daily Vessel Update : {datetime.now().strftime('%Y-%m-%d')} || Royal Castor"
+        
+        plain_body = "Dear Royal Castor Team,\n\nPlease find below the daily vessel update.\n\n"
         for booking in royal_castor_data:
             plain_body += f"""
 Customer: {booking['Customer']}
@@ -643,11 +744,8 @@ Container No: {booking['Container No']}
 Vessel: {booking['Vessel']}
 ETD: {booking['ETD']}
 """
-        plain_body += """
-Note: This is an Auto Generated Mail.
-"""
-        msg.attach(MIMEText(plain_body, 'plain'))
-
+        plain_body += "\nNote: This is an Auto Generated Mail."
+        
         html_body = f"""
 <html>
 <body style="font-family: Arial, sans-serif;">
@@ -682,33 +780,25 @@ Note: This is an Auto Generated Mail.
 </body>
 </html>
 """
-        msg.attach(MIMEText(html_body, 'html'))
-
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(sender_email, normalized_app_password(sender_password))
-            recipients = [customer_email, "chirag@dessertmarine.com"]
-            server.sendmail(sender_email, recipients, msg.as_string())
-            print(f"Royal Castor vessel update sent to {msg['To']} (CC: {msg['Cc']})")
+        
+        ok, details = send_email_smart(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body)
+        if ok:
+            print(f"Royal Castor vessel update sent: {details}")
+        else:
+            print(f"Failed to send Royal Castor update: {details}")
 
     except Exception as e:
         print(f"Error sending Royal Castor vessel update: {str(e)}")
+        traceback.print_exc()
 
 @app.route('/api/send-sob-email', methods=['POST'])
 def send_sob_email():
-    """
-    Sends SOB email using branch sender chosen by LOCATION stored in Firestore.
-    Priority to determine location:
-      1) Firestore entry by id (preferred)
-      2) Firestore entry by bookingNo (fallback)
-      3) Request body 'location' (last resort, defaults to MUMBAI)
-    Accepts customer_email / sales_person_email as list or string.
-    """
+    """Sends SOB email using smart email sending."""
     try:
         data = request.get_json()
         print(f"Received data: {data}")
 
-        # ---------- Inputs from request (used for email content) ----------
+        # Inputs from request
         booking_id = data.get('id') or data.get('entry_id')
         booking_no = data.get('booking_no') or data.get('bookingNo') or ''
         customer_email = data.get('customer_email')
@@ -724,7 +814,7 @@ def send_sob_email():
         volume = data.get('volume')
         bl_no = data.get('bl_no', '')
 
-        # ---------- Find LOCATION from Firestore ----------
+        # Find LOCATION from Firestore
         def _extract_loc_str(loc_val):
             if isinstance(loc_val, dict):
                 return (loc_val.get('name') or '').strip()
@@ -764,7 +854,7 @@ def send_sob_email():
         location = location_from_db or _extract_loc_str(data.get('location')) or "MUMBAI"
         print(f"[SOB] Using location: {location}")
 
-        # ---------- Coerce email arrays ----------
+        # Coerce email arrays
         def _coerce_emails(val):
             if not val:
                 return []
@@ -782,7 +872,7 @@ def send_sob_email():
             print("[SOB] Missing customer_email or sales_person_email")
             return jsonify({"error": "Customer or salesperson email missing"}), 400
 
-        # ---------- Container no formatting ----------
+        # Container no formatting
         if container_no is None:
             container_no_str = ""
         elif isinstance(container_no, list):
@@ -792,16 +882,13 @@ def send_sob_email():
         else:
             container_no_str = str(container_no)
 
-        # ---------- Pick sender based on LOCATION from DB ----------
-        sender_email, sender_password = get_sender_by_location(location)
-
-        # ---------- Compose mail ----------
-        msg = MIMEMultipart('alternative')
-        msg['From'] = sender_email
-        msg['To'] = ", ".join(customer_emails)
-        msg['Cc'] = ", ".join(sales_person_emails)
-        msg['Subject'] = f"{customer_name} | SHIPPED ON BOARD | {vessel} | {booking_no} | {bl_no}"
-
+        # Pick sender based on LOCATION
+        sender_email, _ = get_sender_by_location(location)
+        sender_name = customer_name or "Dessert Marine Services"
+        
+        # Compose email
+        subject = f"{customer_name} | SHIPPED ON BOARD | {vessel} | {booking_no} | {bl_no}"
+        
         plain_body = f"""
 Dear Sir/Madam,
 
@@ -822,8 +909,6 @@ For any queries please write to cs team.
 
 Note: This is an Auto Generated Mail.
 """
-        msg.attach(MIMEText(plain_body, 'plain'))
-
         html_body = f"""
 <html>
 <body style="font-family: Arial, sans-serif;">
@@ -859,133 +944,27 @@ Note: This is an Auto Generated Mail.
 </body>
 </html>
 """
-        msg.attach(MIMEText(html_body, 'html'))
-
         print(f"[SOB] Sending from {sender_email} (location: {location}) to {customer_emails} CC {sales_person_emails}")
-        # Extra debug info to help diagnose SMTP/login/send failures
-        try:
-            raw_pw = sender_password
-            norm_pw = normalized_app_password(sender_password)
-        except Exception as _pw_e:
-            raw_pw = '<error retrieving>'
-            norm_pw = '<error normalizing>'
-        print(f"[SOB][DEBUG] sender_email={sender_email}, raw_password_len={len(str(raw_pw)) if raw_pw is not None else 'NA'}, normalized_password_len={len(str(norm_pw)) if norm_pw is not None else 'NA'}")
-
-        recipients = customer_emails + sales_person_emails
-        print(f"[SOB][DEBUG] recipients={recipients}")
-        body_preview = (plain_body[:500] + '...') if len(plain_body) > 500 else plain_body
-        print(f"[SOB][DEBUG] plain_body_preview={body_preview}")
-
-        # Quick TCP check to SMTP server — if blocked on Render, fallback to SendGrid
-        try:
-            sock = socket.create_connection((SMTP_SERVER, SMTP_PORT), timeout=5)
-            sock.close()
-            smtp_reachable = True
-            print(f"[SOB] SMTP server {SMTP_SERVER}:{SMTP_PORT} reachable (TCP)")
-        except Exception as e_tcp:
-            smtp_reachable = False
-            print(f"[SOB][WARN] SMTP TCP connect failed: {e_tcp}")
-            traceback.print_exc()
-
-        if not smtp_reachable:
-            print("[SOB] Falling back to SendGrid due to unreachable SMTP")
-            ok, details = send_via_sendgrid(sender_email, customer_name, customer_emails, sales_person_emails, msg['Subject'], plain_body, html_body)
-            if ok:
-                print(f"[SOB] Sent via SendGrid: {details}")
-                return jsonify({"message": "Email sent via SendGrid"}), 200
-            else:
-                print(f"[SOB][ERROR] SendGrid fallback failed: {details}")
-                return jsonify({"error": "Both SMTP and SendGrid failed", "details": details}), 502
-
-        # Proceed with SMTP send if reachable
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            try:
-                server.set_debuglevel(0)
-                server.starttls()
-                print("[SOB] TLS started")
-                server.login(sender_email, norm_pw)
-                print("[SOB] Login successful")
-            except Exception as e:
-                print(f"[SOB][ERROR] SMTP login failed: {str(e)} — attempting SendGrid fallback")
-                traceback.print_exc()
-                ok, details = send_via_sendgrid(sender_email, customer_name, customer_emails, sales_person_emails, msg['Subject'], plain_body, html_body)
-                if ok:
-                    print(f"[SOB] Sent via SendGrid after SMTP login failure: {details}")
-                    return jsonify({"message": "Email sent via SendGrid"}), 200
-                return jsonify({"error": "SMTP login failed and SendGrid fallback failed", "details": str(e)}), 500
-
-            try:
-                msg_str = msg.as_string()
-                print(f"[SOB][DEBUG] message_size={len(msg_str)} bytes")
-                server.sendmail(sender_email, recipients, msg_str)
-                print("[SOB] Email sent successfully")
-            except Exception as e:
-                print(f"[SOB][ERROR] SMTP sendmail failed: {str(e)} — attempting SendGrid fallback")
-                traceback.print_exc()
-                ok, details = send_via_sendgrid(sender_email, customer_name, customer_emails, sales_person_emails, msg['Subject'], plain_body, html_body)
-                if ok:
-                    print(f"[SOB] Sent via SendGrid after SMTP send failure: {details}")
-                    return jsonify({"message": "Email sent via SendGrid"}), 200
-                return jsonify({"error": "SMTP send failed and SendGrid fallback failed", "details": str(e)}), 502
-
-        return jsonify({"message": "Email sent successfully"}), 200
+        
+        # Use smart email sending
+        ok, details = send_email_smart(sender_email, sender_name, customer_emails, 
+                                      sales_person_emails, subject, plain_body, html_body)
+        
+        if ok:
+            print(f"[SOB] Email sent successfully via {details}")
+            return jsonify({"message": f"Email sent successfully via {details.split(':')[0]}"}), 200
+        else:
+            print(f"[SOB] Email sending failed: {details}")
+            return jsonify({"error": f"Email sending failed: {details}"}), 502
 
     except Exception as e:
         print(f"[SOB] Error sending email: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/api/check-smtp', methods=['GET'])
-def check_smtp():
-    """Check outbound connectivity to SMTP server (TCP connect + optional STARTTLS handshake).
-    Returns JSON describing results. Use query params `host`, `port`, and `timeout` to override.
-    """
-    try:
-        host = request.args.get('host', SMTP_SERVER)
-        port = int(request.args.get('port', SMTP_PORT))
-        timeout = int(request.args.get('timeout', 10))
-        print(f"[CHECK-SMTP] Testing TCP connect to {host}:{port} with timeout {timeout}s")
-
-        # Test raw TCP connect
-        try:
-            sock = socket.create_connection((host, port), timeout=timeout)
-            sock.close()
-            tcp_ok = True
-            print(f"[CHECK-SMTP] TCP connect to {host}:{port} succeeded")
-        except Exception as e_tcp:
-            print(f"[CHECK-SMTP][ERROR] TCP connect failed: {e_tcp}")
-            traceback.print_exc()
-            return jsonify({"ok": False, "tcp_connect": False, "error": str(e_tcp)}), 200
-
-        # Try an SMTP handshake (EHLO + STARTTLS if supported)
-        try:
-            with smtplib.SMTP(host, port, timeout=timeout) as s:
-                s.ehlo()
-                has_starttls = s.has_extn('STARTTLS')
-                print(f"[CHECK-SMTP] Server STARTTLS supported: {has_starttls}")
-                if has_starttls:
-                    try:
-                        s.starttls()
-                        s.ehlo()
-                        print("[CHECK-SMTP] STARTTLS handshake succeeded")
-                    except Exception as e_tls:
-                        print(f"[CHECK-SMTP][ERROR] STARTTLS failed: {e_tls}")
-                        traceback.print_exc()
-                        return jsonify({"ok": False, "tcp_connect": True, "smtp_handshake": False, "error": str(e_tls)}), 200
-        except Exception as e_smtp:
-            print(f"[CHECK-SMTP][ERROR] SMTP connect/ehlo failed: {e_smtp}")
-            traceback.print_exc()
-            return jsonify({"ok": False, "tcp_connect": True, "smtp_handshake": False, "error": str(e_smtp)}), 200
-
-        return jsonify({"ok": True, "tcp_connect": True, "smtp_handshake": True}), 200
-
-    except Exception as e:
-        print(f"[CHECK-SMTP][FATAL] {e}")
         traceback.print_exc()
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/send-selling-email', methods=['POST'])
 def send_selling_email():
+    """Send selling rate email."""
     try:
         data = request.get_json()
         print(f"Received data for selling email: {data}")
@@ -1008,13 +987,12 @@ def send_selling_email():
             print("Missing sales_person_email")
             return jsonify({"error": "Salesperson email missing"}), 400
 
-        msg = MIMEMultipart('alternative')
-        sender_email, sender_password = get_sender_by_location(location)
-        msg['From'] = sender_email
-        msg['To'] = ", ".join(["manas.jadhav.7779@gmail.com", "tech.manasjadhav@gmail.com"])
-        msg['Cc'] = sales_person_email
-        msg['Subject'] = f"Selling | {bl_no}"
-
+        sender_email, _ = get_sender_by_location(location)
+        sender_name = "Dessert Marine Services"
+        to_emails = ["manas.jadhav.7779@gmail.com", "tech.manasjadhav@gmail.com"]
+        cc_emails = [sales_person_email]
+        subject = f"Selling | {bl_no}"
+        
         plain_body = f"""
 Dear Team,
 
@@ -1031,8 +1009,6 @@ SELL RATE: {sell_rate}
 
 Note: This is an Auto Generated Mail.
 """
-        msg.attach(MIMEText(plain_body, 'plain'))
-
         html_body = f"""
 <html>
 <body style="font-family: Arial, sans-serif;">
@@ -1064,23 +1040,24 @@ Note: This is an Auto Generated Mail.
 </body>
 </html>
 """
-        msg.attach(MIMEText(html_body, 'html'))
-
-        print(f"Attempting to send selling email from {sender_email} to {msg['To']} with CC {sales_person_email}")
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(sender_email, normalized_app_password(sender_password))
-            recipients = ["manas.jadhav.7779@gmail.com", "tech.manasjadhav@gmail.com", sales_person_email]
-            server.sendmail(sender_email, recipients, msg.as_string())
-            print("Selling email sent successfully")
-
-        return jsonify({"message": "Selling email sent successfully"}), 200
+        print(f"Attempting to send selling email from {sender_email} to {to_emails} with CC {cc_emails}")
+        
+        ok, details = send_email_smart(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body)
+        
+        if ok:
+            print(f"Selling email sent successfully via {details}")
+            return jsonify({"message": "Selling email sent successfully"}), 200
+        else:
+            print(f"Failed to send selling email: {details}")
+            return jsonify({"error": f"Failed to send email: {details}"}), 502
 
     except Exception as e:
         print(f"Error sending selling email: {str(e)}")
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 def fetch_bookings_by_salesperson():
+    """Fetch bookings grouped by salesperson."""
     try:
         bookings_ref = db.collection("entries")
         docs = bookings_ref.stream()
@@ -1089,7 +1066,6 @@ def fetch_bookings_by_salesperson():
         for doc in docs:
             entry = doc.to_dict()
             entry["id"] = doc.id
-            print(f"Entry {entry['id']}: {entry}")
 
             customer = entry.get("customer", {})
             if not isinstance(customer, dict):
@@ -1149,6 +1125,7 @@ def fetch_bookings_by_salesperson():
         return {}
 
 def generate_excel_report(salesperson_email, bookings):
+    """Generate Excel report for salesperson."""
     if not bookings:
         print(f"No bookings found for salesperson {salesperson_email}")
         return None
@@ -1188,6 +1165,7 @@ def generate_excel_report(salesperson_email, bookings):
     return excel_filename
 
 def send_daily_report():
+    """Send daily booking reports to salespeople."""
     try:
         bookings_by_salesperson = fetch_bookings_by_salesperson()
         if not bookings_by_salesperson:
@@ -1203,11 +1181,15 @@ def send_daily_report():
             excel_file = generate_excel_report(salesperson_email, all_bookings)
             if not excel_file:
                 continue
-            sender_email, sender_password = get_sender_by_location(all_bookings[0].get('Location', ''))
-            msg = MIMEMultipart()
-            msg['From'] = sender_email
-            msg['Subject'] = f"Daily Booking Report - {datetime.now().strftime('%Y-%m-%d')}"
-
+            
+            # Read Excel file
+            with open(excel_file, 'rb') as f:
+                excel_content = f.read()
+            
+            sender_email, _ = get_sender_by_location(all_bookings[0].get('Location', ''))
+            sender_name = "Dessert Marine Services"
+            
+            # Parse recipient emails
             all_sales_emails = []
             if isinstance(salesperson_email, str):
                 all_sales_emails = [e.strip() for e in salesperson_email.split(',') if e.strip()]
@@ -1216,9 +1198,11 @@ def send_daily_report():
                     all_sales_emails.extend([x.strip() for x in str(e).split(',') if x.strip()])
             else:
                 all_sales_emails = [str(salesperson_email)]
-            msg['To'] = ', '.join(all_sales_emails)
+            
+            subject = f"Daily Booking Report - {datetime.now().strftime('%Y-%m-%d')}"
             sales_person_name = all_bookings[0].get('Sales Person', 'Salesperson') if all_bookings else 'Salesperson'
-            body = f"""
+            
+            plain_body = f"""
 Dear {sales_person_name},
 
 Please find attached the daily booking report as of {datetime.now().strftime('%Y-%m-%d')} (includes all locations).
@@ -1227,39 +1211,99 @@ For any queries, please write to the CS team.
 
 Note: This is an Auto Generated Mail.
 """
-            msg.attach(MIMEText(body, 'plain'))
-            with open(excel_file, 'rb') as f:
-                attachment = MIMEApplication(f.read(), _subtype="xlsx")
-                attachment.add_header('Content-Disposition', 'attachment', filename=excel_file)
-                msg.attach(attachment)
-            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-                server.starttls()
-                server.login(sender_email, normalized_app_password(sender_password))
-                server.sendmail(sender_email, all_sales_emails, msg.as_string())
-                print(f"Daily report sent to {salesperson_email} (all locations)")
-            os.remove(excel_file)
+            html_body = f"""
+<html>
+<body style="font-family: Arial, sans-serif;">
+    <p>Dear {sales_person_name},</p>
+    <p>Please find attached the daily booking report as of {datetime.now().strftime('%Y-%m-%d')} (includes all locations).</p>
+    <p>For any queries, please write to the CS team.</p>
+    <p><em>Note: This is an Auto Generated Mail.</em></p>
+</body>
+</html>
+"""
+            # For local development with SMTP
+            if not IS_RENDER:
+                try:
+                    msg = MIMEMultipart()
+                    msg['From'] = sender_email
+                    msg['To'] = ', '.join(all_sales_emails)
+                    msg['Subject'] = subject
+                    
+                    msg.attach(MIMEText(plain_body, 'plain'))
+                    
+                    # Attach Excel file
+                    attachment = MIMEApplication(excel_content, _subtype="xlsx")
+                    attachment.add_header('Content-Disposition', 'attachment', filename=excel_file)
+                    msg.attach(attachment)
+                    
+                    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+                        server.starttls()
+                        server.login(sender_email, normalized_app_password(SENDER_PASSWORD_MUMBAI))
+                        server.sendmail(sender_email, all_sales_emails, msg.as_string())
+                        print(f"Daily report sent via SMTP to {salesperson_email}")
+                except Exception as e:
+                    print(f"SMTP failed for daily report: {e}")
+                    # Fallback to API without attachment
+                    plain_body += "\n\n[Note: Attachment not available due to SMTP failure]"
+                    ok, details = send_email_smart(sender_email, sender_name, all_sales_emails, [], 
+                                                  subject + " (No attachment)", plain_body, html_body)
+                    if ok:
+                        print(f"Daily report sent via API (no attachment) to {salesperson_email}: {details}")
+            else:
+                # On Render: Use API without attachment
+                plain_body += "\n\n[Note: Excel attachment not available via API on Render]"
+                html_body += "<p><em>[Note: Excel attachment not available via API on Render]</em></p>"
+                
+                ok, details = send_email_smart(sender_email, sender_name, all_sales_emails, [], subject, plain_body, html_body)
+                if ok:
+                    print(f"Daily report sent via API to {salesperson_email}: {details}")
+                else:
+                    print(f"Failed to send daily report to {salesperson_email}: {details}")
+            
+            # Clean up
+            if os.path.exists(excel_file):
+                os.remove(excel_file)
+                
     except Exception as e:
         print(f"Error sending daily reports: {str(e)}")
+        traceback.print_exc()
+
+@app.route('/api/check-email-status', methods=['GET'])
+def check_email_status():
+    """Check email configuration status."""
+    status = {
+        "is_render": IS_RENDER,
+        "resend_api_key": "Configured" if RESEND_API_KEY else "Not configured",
+        "sendgrid_api_key": "Configured" if SENDGRID_API_KEY else "Not configured",
+        "smtp_configured": True if SENDER_EMAIL_MUMBAI and SENDER_PASSWORD_MUMBAI else False,
+        "preferred_provider": "Resend" if RESEND_API_KEY else ("SendGrid" if SENDGRID_API_KEY else "SMTP")
+    }
+    return jsonify(status), 200
 
 # Schedule tasks
-#schedule.every().day.at("13:30").do(send_daily_report)
 schedule.every().hour.do(send_si_cutoff_reminder)
-#schedule.every().day.at("12:30").do(send_pending_si_report)
-#schedule.every().day.at("13:30").do(send_royal_castor_vessel_update)
+# Uncomment these when you want to enable them
+# schedule.every().day.at("18:00").do(send_pending_si_report)  # 6:00 PM IST
+# schedule.every().day.at("19:30").do(send_royal_castor_vessel_update)  # 7:30 PM IST
+# schedule.every().day.at("17:00").do(send_daily_report)  # 5:00 PM IST
 
 def run_scheduler():
+    """Run the scheduled tasks."""
     while True:
         schedule.run_pending()
         time.sleep(60)
 
 if __name__ == '__main__':
-    import os
     if os.environ.get('RUN_SCHEDULER', 'false').lower() == 'true':
-        print(f"[WORKER] Starting scheduler with SENDER_EMAIL_MUMBAI: {SENDER_EMAIL_MUMBAI}")
+        print(f"[WORKER] Starting scheduler on Render: {IS_RENDER}")
+        print(f"[WORKER] Resend API Key: {'Configured' if RESEND_API_KEY else 'Not configured'}")
+        print(f"[WORKER] SendGrid API Key: {'Configured' if SENDGRID_API_KEY else 'Not configured'}")
         scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
         scheduler_thread.start()
         while True:
             time.sleep(3600)
     else:
-        print(f"[WEB] Starting Flask app with SENDER_EMAIL_MUMBAI: {SENDER_EMAIL_MUMBAI}")
+        print(f"[WEB] Starting Flask app on Render: {IS_RENDER}")
+        print(f"[WEB] Resend API Key: {'Configured' if RESEND_API_KEY else 'Not configured'}")
+        print(f"[WEB] SendGrid API Key: {'Configured' if SENDGRID_API_KEY else 'Not configured'}")
         app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
