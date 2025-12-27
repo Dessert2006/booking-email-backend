@@ -1,3 +1,7 @@
+#!/usr/bin/env python3
+"""
+Email automation system for Dessert Marine with SendGrid integration.
+"""
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import smtplib
@@ -135,6 +139,7 @@ def send_via_sendgrid(sender_email, sender_name, to_emails, cc_emails, subject, 
                 out.append({"email": e})
         return out
     
+    # Build payload according to SendGrid API v3
     payload = {
         "personalizations": [
             {
@@ -142,34 +147,59 @@ def send_via_sendgrid(sender_email, sender_name, to_emails, cc_emails, subject, 
                 "cc": to_list(cc_emails)
             }
         ],
-        "from": {"email": sender_email, "name": sender_name or ""},
+        "from": {
+            "email": sender_email,
+            "name": sender_name or ""
+        },
         "subject": subject,
         "content": [
-            {"type": "text/plain", "value": plain_body},
-            {"type": "text/html", "value": html_body}
+            {
+                "type": "text/plain",
+                "value": plain_body
+            },
+            {
+                "type": "text/html",
+                "value": html_body
+            }
         ]
     }
     
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=15)
         if resp.status_code in (200, 202):
+            print(f"[SENDGRID] Email sent successfully (status={resp.status_code})")
             return True, f'status={resp.status_code}'
-        return False, f'status={resp.status_code}, body={resp.text}'
+        else:
+            print(f"[SENDGRID][ERROR] Status {resp.status_code}: {resp.text}")
+            return False, f'status={resp.status_code}, body={resp.text}'
     except Exception as e:
+        print(f"[SENDGRID][ERROR] {str(e)}")
         return False, str(e)
 
 def send_email_smart(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body):
     """
     Smart email sending that chooses the best provider.
+    Prioritize SendGrid when on Render.
     """
     print(f"[EMAIL] Attempting to send email from: {sender_email}")
+    print(f"[EMAIL] To: {to_emails}, CC: {cc_emails}")
+    print(f"[EMAIL] Subject: {subject}")
     
-    # Try SMTP first (even on Render - might work with Gmail)
+    # If we're on Render and have SendGrid key, use SendGrid first
+    if IS_RENDER and SENDGRID_API_KEY:
+        print("[EMAIL] On Render, trying SendGrid first...")
+        ok, details = send_via_sendgrid(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body)
+        if ok:
+            return True, f"SendGrid: {details}"
+        else:
+            print(f"[EMAIL] SendGrid failed: {details}")
+    
+    # Then try SMTP (even on Render - might work with Gmail)
     try:
         print("[EMAIL] Trying SMTP...")
-        # Use Mumbai credentials for all emails temporarily
+        # Use Mumbai credentials for all emails
         smtp_email = "info@dessertmarine.com"
-        smtp_password = "wrkq sobg qdyc ujff"  # Your Gmail app password
+        smtp_password = "wrkq sobg qdyc ujff"
         
         msg = MIMEMultipart('alternative')
         msg['From'] = f"{sender_name} <{smtp_email}>"
@@ -192,19 +222,19 @@ def send_email_smart(sender_email, sender_name, to_emails, cc_emails, subject, p
     except Exception as e:
         print(f"[EMAIL] SMTP failed: {str(e)}")
     
-    # Then try Resend
+    # Then try Resend if available
     if RESEND_API_KEY:
         print("[EMAIL] Trying Resend...")
         ok, details = send_via_resend(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body)
         if ok:
             return True, f"Resend: {details}"
     
-    # Then try SendGrid if you have the key
+    # Last fallback: Try SendGrid again (in case it wasn't tried above)
     if SENDGRID_API_KEY:
-        print("[EMAIL] Trying SendGrid...")
+        print("[EMAIL] Trying SendGrid as fallback...")
         ok, details = send_via_sendgrid(sender_email, sender_name, to_emails, cc_emails, subject, plain_body, html_body)
         if ok:
-            return True, f"SendGrid: {details}"
+            return True, f"SendGrid (fallback): {details}"
     
     return False, "All email methods failed"
 
@@ -1261,7 +1291,7 @@ def check_email_status():
         "resend_api_key": "Configured" if RESEND_API_KEY else "Not configured",
         "sendgrid_api_key": "Configured" if SENDGRID_API_KEY else "Not configured",
         "smtp_configured": True if SENDER_EMAIL_MUMBAI and SENDER_PASSWORD_MUMBAI else False,
-        "preferred_provider": "Resend" if RESEND_API_KEY else ("SendGrid" if SENDGRID_API_KEY else "SMTP")
+        "preferred_provider": "SendGrid" if SENDGRID_API_KEY else ("Resend" if RESEND_API_KEY else "SMTP")
     }
     return jsonify(status), 200
 
@@ -1283,6 +1313,7 @@ if __name__ == '__main__':
         print(f"[WORKER] Starting scheduler on Render: {IS_RENDER}")
         print(f"[WORKER] Resend API Key: {'Configured' if RESEND_API_KEY else 'Not configured'}")
         print(f"[WORKER] SendGrid API Key: {'Configured' if SENDGRID_API_KEY else 'Not configured'}")
+        print(f"[WORKER] Using SendGrid as primary email provider on Render")
         scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
         scheduler_thread.start()
         while True:
@@ -1291,4 +1322,5 @@ if __name__ == '__main__':
         print(f"[WEB] Starting Flask app on Render: {IS_RENDER}")
         print(f"[WEB] Resend API Key: {'Configured' if RESEND_API_KEY else 'Not configured'}")
         print(f"[WEB] SendGrid API Key: {'Configured' if SENDGRID_API_KEY else 'Not configured'}")
+        print(f"[WEB] Using SendGrid as primary email provider on Render")
         app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
