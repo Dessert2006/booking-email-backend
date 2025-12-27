@@ -899,7 +899,7 @@ def send_sob_email():
 
         # Pick sender based on LOCATION
         sender_email, _ = get_sender_by_location(location)
-        sender_name = customer_name or "Dessert Marine Services"
+        sender_name = "Dessert Marine Services"
         
         # Compose email
         subject = f"{customer_name} | SHIPPED ON BOARD | {vessel} | {booking_no} | {bl_no}"
