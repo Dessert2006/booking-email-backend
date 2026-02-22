@@ -47,7 +47,7 @@ SMTP_PORT = 587
 
 # Email credentials
 SENDER_EMAIL_MUMBAI = "info@dessertmarine.com"
-SENDER_PASSWORD_MUMBAI = "wrkq sobg qdyc ujff"
+SENDER_PASSWORD_MUMBAI = "myud rkxh uomg qjra"
 SENDER_EMAIL_GUJARAT = "mundra@dessertmarine.com"
 SENDER_PASSWORD_GUJARAT = "zvvw gynt tedl ihbq"
 
